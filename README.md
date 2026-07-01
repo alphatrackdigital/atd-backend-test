@@ -2,6 +2,18 @@
 
 Backend/API function layer for the AlphaTrack Digital website ecosystem.
 
+## Current Vercel Test Runtime
+
+- GitHub source: `alphatrackdigital/atd-backend-test`
+- Branch: `main`
+- Vercel project: `atd-backend-test`
+- Canonical URL: `https://atd-backend-test.vercel.app`
+- Lead endpoint: `https://atd-backend-test.vercel.app/api/leads`
+
+The public cPanel frontend currently contains build-time endpoint overrides that
+call this Vercel project. Despite the project name, it is therefore the de facto
+production lead backend until the frontend is rebuilt with different endpoints.
+
 This branch contains Netlify Functions for blog APIs, admin APIs, auth, lead/contact handling, and database-related backend work.
 
 ## Branch Role
@@ -64,6 +76,20 @@ JWT_SECRET
 ```
 
 Additional third-party API keys should be stored in Netlify environment variables.
+
+Meta CAPI requires these server-side variables on every deployment environment
+that receives lead requests:
+
+```text
+META_PIXEL_ID
+META_CAPI_ACCESS_TOKEN
+META_GRAPH_API_VERSION
+META_CAPI_TEST_EVENT_CODE
+```
+
+`META_GRAPH_API_VERSION` is optional and defaults to `v23.0`.
+`META_CAPI_TEST_EVENT_CODE` is temporary: set it only during a controlled Meta
+Test Events session, redeploy, verify, then remove it and redeploy again.
 
 ## Workflow
 
