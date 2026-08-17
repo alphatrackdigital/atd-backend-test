@@ -66,17 +66,9 @@
   to = "/.netlify/functions/brevo-meeting-webhook"
   status = 200
 
-# CORS headers
-[[headers]]
-  for = "/api/*"
-  [headers.values]
-    Access-Control-Allow-Origin = "*"
-    Access-Control-Allow-Headers = "Content-Type, Authorization"
-    Access-Control-Allow-Methods = "GET, POST, PUT, DELETE, OPTIONS"
+[[redirects]]
+  from = "/api/brevo-transactional-webhook"
+  to = "/.netlify/functions/brevo-transactional-webhook"
+  status = 200
 
-[[headers]]
-  for = "/.netlify/functions/*"
-  [headers.values]
-    Access-Control-Allow-Origin = "*"
-    Access-Control-Allow-Headers = "Content-Type, Authorization"
-    Access-Control-Allow-Methods = "GET, POST, PUT, DELETE, OPTIONS"
+# CORS is emitted by each function after validating the request origin.

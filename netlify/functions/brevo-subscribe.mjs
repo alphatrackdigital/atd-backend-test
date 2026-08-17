@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { buildExitPopupDedupeKey, getIdempotencyRecord, markIdempotencyKey } from "./lib/idempotency.mjs";
 
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 5;
 const SOURCE = "ATD Website Exit Popup";
+const LEAD_SOURCE = "exit_popup";
 
 const requestBuckets = globalThis.__atdExitPopupRequestBuckets ?? new Map();
 globalThis.__atdExitPopupRequestBuckets = requestBuckets;
@@ -116,6 +118,51 @@ const normalizeWebsite = (value) => {
   return trimmed.startsWith("http") ? trimmed : `https://${trimmed}`;
 };
 
+const normalizeRoute = (value) => {
+  if (typeof value !== "string" || !value.trim()) return "";
+  const trimmed = value.trim();
+  try {
+    const url = new URL(trimmed);
+    return url.pathname || "/";
+  } catch {
+    return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  }
+};
+
+const truncateAttribute = (value, maxLength = 500) =>
+  typeof value === "string" ? value.trim().slice(0, maxLength) : "";
+
+const sha256 = (value) => createHash("sha256").update(value.trim().toLowerCase()).digest("hex");
+
+const getAttributionAttributes = (attribution) => {
+  const safeAttribution = attribution && typeof attribution === "object" ? attribution : {};
+  return Object.fromEntries([
+    ["UTM_SOURCE", truncateAttribute(safeAttribution.utmSource)],
+    ["UTM_MEDIUM", truncateAttribute(safeAttribution.utmMedium)],
+    ["UTM_CAMPAIGN", truncateAttribute(safeAttribution.utmCampaign)],
+    ["UTM_CONTENT", truncateAttribute(safeAttribution.utmContent)],
+    ["UTM_TERM", truncateAttribute(safeAttribution.utmTerm)],
+    ["GCLID", truncateAttribute(safeAttribution.gclid)],
+    ["FBCLID", truncateAttribute(safeAttribution.fbclid)],
+    ["LANDING_PAGE", truncateAttribute(safeAttribution.landingPage)],
+    ["REFERRER", truncateAttribute(safeAttribution.referrer)],
+  ].filter(([, value]) => value.length > 0));
+};
+
+const getStringAttribute = (contact, name) => {
+  const value = contact?.attributes?.[name];
+  return typeof value === "string" ? value.trim() : "";
+};
+
+const getBrevoContactByEmail = async (email, apiKey) => {
+  const response = await fetch(`https://api.brevo.com/v3/contacts/${encodeURIComponent(email)}`, {
+    headers: { "api-key": apiKey },
+  });
+
+  if (!response.ok) return undefined;
+  return response.json().catch(() => undefined);
+};
+
 const validatePayload = (payload) => {
   if (!payload || typeof payload !== "object") {
     return null;
@@ -124,7 +171,14 @@ const validatePayload = (payload) => {
   const firstName = typeof payload.firstName === "string" ? payload.firstName.trim() : "";
   const email = typeof payload.email === "string" ? payload.email.trim().toLowerCase() : "";
   const website = typeof payload.website === "string" ? payload.website.trim() : "";
+  const route =
+    normalizeRoute(payload.websiteRoute) ||
+    normalizeRoute(payload.route) ||
+    normalizeRoute(payload.pagePath) ||
+    "/";
+  const attribution = payload.attribution && typeof payload.attribution === "object" ? payload.attribution : undefined;
   const optIn = payload.optIn === true;
+  const metaEventId = typeof payload.metaEventId === "string" ? payload.metaEventId.trim().slice(0, 128) : "";
 
   if (!firstName || !isValidEmail(email) || !isValidOptionalWebsite(website)) {
     return null;
@@ -134,29 +188,136 @@ const validatePayload = (payload) => {
     firstName,
     email,
     website: normalizeWebsite(website),
+    route,
+    attribution,
     optIn,
+    metaEventId,
   };
 };
 
-const withConsentAttributes = (attributes, lead) => {
+const getSubmittedRoute = (lead) => {
+  if (!lead.route) return "/";
+  try {
+    const url = new URL(lead.route);
+    return url.pathname || "/";
+  } catch {
+    return lead.route.startsWith("/") ? lead.route : `/${lead.route}`;
+  }
+};
+
+const addCampaignAttributes = (attributes, lead, existingContact) => {
+  const timestamp = new Date().toISOString();
+  const route = getSubmittedRoute(lead);
+  const existingSource = getStringAttribute(existingContact, "SOURCE");
+  const existingLeadSource = getStringAttribute(existingContact, "LEAD_SOURCE");
+  const previousHistory = getStringAttribute(existingContact, "SOURCE_HISTORY");
+  const historyEntry = `${timestamp} | ${SOURCE} | ${LEAD_SOURCE} | ${route}`;
+
+  return {
+    ...attributes,
+    SOURCE,
+    LEAD_SOURCE,
+    FIRST_SOURCE: getStringAttribute(existingContact, "FIRST_SOURCE") || existingSource || SOURCE,
+    FIRST_LEAD_SOURCE:
+      getStringAttribute(existingContact, "FIRST_LEAD_SOURCE") ||
+      existingLeadSource ||
+      LEAD_SOURCE,
+    FIRST_SOURCE_TIMESTAMP: getStringAttribute(existingContact, "FIRST_SOURCE_TIMESTAMP") || timestamp,
+    LAST_SOURCE: SOURCE,
+    LAST_LEAD_SOURCE: LEAD_SOURCE,
+    LAST_SOURCE_TIMESTAMP: timestamp,
+    SOURCE_HISTORY: [previousHistory, historyEntry].filter(Boolean).join("\n").slice(-2000),
+    WEBSITE_ROUTE: route,
+    OFFER: "exit-popup",
+    CONSENT_STATUS: lead.optIn === true ? "opted_in" : "not_provided",
+    CONSENT_TIMESTAMP: timestamp,
+    ...getAttributionAttributes(lead.attribution),
+  };
+};
+
+const withConsentAttributes = (attributes, lead, existingContact) => {
+  const nextAttributes = addCampaignAttributes(attributes, lead, existingContact);
+
   if (lead.optIn !== true) {
-    return attributes;
+    return nextAttributes;
   }
 
-  attributes.OPT_IN = true;
+  nextAttributes.OPT_IN = true;
 
   const consentAttribute = getEnv("BREVO_CONSENT_ATTRIBUTE")?.trim();
   const consentTimestampAttribute = getEnv("BREVO_CONSENT_TIMESTAMP_ATTRIBUTE")?.trim();
 
   if (consentAttribute) {
-    attributes[consentAttribute] = "Yes";
+    nextAttributes[consentAttribute] = "Yes";
   }
 
   if (consentTimestampAttribute) {
-    attributes[consentTimestampAttribute] = new Date().toISOString();
+    nextAttributes[consentTimestampAttribute] = nextAttributes.CONSENT_TIMESTAMP;
   }
 
-  return attributes;
+  return nextAttributes;
+};
+
+const getMetaEventSourceUrl = (lead) => {
+  try {
+    return new URL(lead.attribution?.landingPage || getSubmittedRoute(lead), "https://alphatrack.digital").toString();
+  } catch {
+    return `https://alphatrack.digital${getSubmittedRoute(lead)}`;
+  }
+};
+
+const sendMetaConversionEvent = async (lead, request) => {
+  const pixelId = getEnv("META_PIXEL_ID")?.trim();
+  const accessToken = getEnv("META_CAPI_ACCESS_TOKEN")?.trim();
+
+  if (!pixelId || !accessToken) {
+    console.info("Meta CAPI is not configured; skipping exit popup event.");
+    return;
+  }
+
+  const graphVersion = getEnv("META_GRAPH_API_VERSION")?.trim() || "v23.0";
+  const testEventCode = getEnv("META_CAPI_TEST_EVENT_CODE")?.trim();
+  const eventId = lead.metaEventId || buildExitPopupDedupeKey(lead);
+  const clientIp = getClientIp(request);
+  const userAgent = request.headers.get("user-agent") || "";
+
+  const response = await fetch(
+    `https://graph.facebook.com/${encodeURIComponent(graphVersion)}/${encodeURIComponent(pixelId)}/events?access_token=${encodeURIComponent(accessToken)}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        data: [
+          {
+            event_name: "Lead",
+            event_time: Math.floor(Date.now() / 1000),
+            event_id: eventId,
+            action_source: "website",
+            event_source_url: getMetaEventSourceUrl(lead),
+            user_data: {
+              em: [sha256(lead.email)],
+              fn: [sha256(lead.firstName)],
+              ...(lead.attribution?.fbp ? { fbp: lead.attribution.fbp } : {}),
+              ...(lead.attribution?.fbc ? { fbc: lead.attribution.fbc } : {}),
+              ...(clientIp !== "unknown" ? { client_ip_address: clientIp } : {}),
+              ...(userAgent ? { client_user_agent: userAgent } : {}),
+            },
+            custom_data: {
+              lead_source: "exit_popup",
+              content_name: "Exit Popup Growth Audit",
+              website_route: getSubmittedRoute(lead),
+            },
+          },
+        ],
+        ...(testEventCode ? { test_event_code: testEventCode } : {}),
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Meta CAPI rejected the exit popup event. ${errorText.slice(0, 180)}`);
+  }
 };
 
 export default async (request) => {
@@ -215,6 +376,7 @@ export default async (request) => {
   const isDuplicate = Boolean(existingSubmission);
 
   try {
+    const existingBrevoContact = await getBrevoContactByEmail(lead.email, brevoApiKey);
     const brevoResponse = await fetch("https://api.brevo.com/v3/contacts", {
       method: "POST",
       headers: {
@@ -226,8 +388,7 @@ export default async (request) => {
         attributes: withConsentAttributes({
           FIRSTNAME: lead.firstName,
           WEBSITE: lead.website,
-          SOURCE,
-        }, lead),
+        }, lead, existingBrevoContact),
         listIds: [brevoListId],
         updateEnabled: true,
       }),
@@ -253,9 +414,15 @@ export default async (request) => {
         emailHash: dedupeKey.split("/").at(-1),
         listId: brevoListId,
       });
+
+      await sendMetaConversionEvent(lead, request).catch((error) => {
+        console.error("Meta CAPI exit popup event failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
     }
 
-    return json({ ok: true, duplicate: isDuplicate }, { headers: corsHeaders });
+    return json({ ok: true, duplicate: isDuplicate, metaEventId: lead.metaEventId }, { headers: corsHeaders });
   } catch (error) {
     console.error("Brevo exit popup submission failed", {
       listId: brevoListId,

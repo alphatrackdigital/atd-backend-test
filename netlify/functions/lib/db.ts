@@ -10,6 +10,6 @@ export async function connectDB(): Promise<void> {
     throw new Error("MONGODB_URI environment variable is not set.");
   }
 
-  await mongoose.connect(uri, { dbName: "alphatrack" });
+  await mongoose.connect(uri, { dbName: process.env.MONGODB_DATABASE || "alphatrack" });
   isConnected = true;
 }
