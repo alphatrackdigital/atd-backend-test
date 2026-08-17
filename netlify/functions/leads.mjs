@@ -585,6 +585,18 @@ export default async (request) => {
   const dedupeKey = buildLeadDedupeKey(payload);
   const isDuplicate = Boolean(await getIdempotencyRecord(dedupeKey));
 
+  const providerErrorResponse = (errorText) => {
+    console.error("Brevo lead capture failed", {
+      source: payload.source,
+      listId,
+      message: errorText.slice(0, 180),
+    });
+    return json(
+      { ok: false, message: "Unable to submit lead right now." },
+      { status: 502, headers: corsHeaders },
+    );
+  };
+
   try {
     const isNewsletterDoiEnabled =
       payload.source === "newsletter" &&
@@ -623,13 +635,13 @@ export default async (request) => {
           body: JSON.stringify(toBrevoPayload(payload, listId, existingBrevoContact)),
         });
       } else {
-        return json({ ok: false, message: `Failed to submit lead to provider. ${errorText.slice(0, 180)}` }, { status: 502, headers: corsHeaders });
+        return providerErrorResponse(errorText);
       }
     }
 
     if (!brevoResponse.ok) {
       const errorText = await brevoResponse.text();
-      return json({ ok: false, message: `Failed to submit lead to provider. ${errorText.slice(0, 180)}` }, { status: 502, headers: corsHeaders });
+      return providerErrorResponse(errorText);
     }
 
     const brevoContact = await brevoResponse.clone().json().catch(() => ({}));

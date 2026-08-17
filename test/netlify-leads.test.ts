@@ -388,6 +388,34 @@ describe("leads function", () => {
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("graph.facebook.com"))).toHaveLength(0);
   });
 
+  it("does not expose Brevo provider details when lead capture fails", async () => {
+    const providerDetail = "sensitive provider detail: internal contact validation context";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("", { status: 404 }))
+      .mockResolvedValueOnce(new Response(providerDetail, { status: 400 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await handler(buildRequest({
+      source: "contact_form",
+      firstName: "Ada",
+      lastName: "Lovelace",
+      email: "ada@example.com",
+      serviceInterest: ["Growth Strategy"],
+    }));
+
+    expect(response.status).toBe(502);
+    const body = await response.json();
+    expect(body).toEqual({ ok: false, message: "Unable to submit lead right now." });
+    expect(JSON.stringify(body)).not.toContain(providerDetail);
+    expect(errorSpy).toHaveBeenCalledWith("Brevo lead capture failed", {
+      source: "contact_form",
+      listId: 8,
+      message: providerDetail,
+    });
+  });
+
   it("does not resend notifications for duplicate tracking audit submissions", async () => {
     process.env.META_PIXEL_ID = "123456789";
     process.env.META_CAPI_ACCESS_TOKEN = "meta-token";
