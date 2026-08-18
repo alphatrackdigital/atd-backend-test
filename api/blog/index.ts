@@ -4,7 +4,7 @@ import { BlogPost } from "../_lib/models/BlogPost";
 import { setCorsHeaders } from "../_lib/http";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  setCorsHeaders(res);
+  setCorsHeaders(req, res);
 
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "GET") return res.status(405).json({ ok: false, message: "Method not allowed." });

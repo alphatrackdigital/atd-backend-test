@@ -4,6 +4,12 @@ import { connectDB } from "./lib/db";
 import { AdminUser } from "./lib/models/AdminUser";
 import { signAdminToken } from "./lib/jwt";
 import { corsHeaders, jsonResponse } from "./lib/http";
+import {
+  checkLoginThrottle,
+  clearLoginFailures,
+  loginThrottleKey,
+  recordLoginFailure,
+} from "./lib/loginThrottle";
 
 export const handler: Handler = async (event: HandlerEvent) => {
   const headers = corsHeaders(event.headers["origin"]);
@@ -30,6 +36,19 @@ export const handler: Handler = async (event: HandlerEvent) => {
     return jsonResponse({ ok: false, message: "Email and password are required." }, 400, headers);
   }
 
+  const clientIp = String(
+    event.headers["x-nf-client-connection-ip"] || event.headers["x-forwarded-for"] || "unknown"
+  ).split(",")[0].trim();
+  const throttleKey = loginThrottleKey(clientIp, email);
+  const throttle = checkLoginThrottle(throttleKey);
+  if (!throttle.allowed) {
+    return jsonResponse(
+      { ok: false, message: "Too many login attempts. Please try again later." },
+      429,
+      { ...headers, "Retry-After": String(throttle.retryAfterSeconds) }
+    );
+  }
+
   try {
     await connectDB();
 
@@ -41,9 +60,18 @@ export const handler: Handler = async (event: HandlerEvent) => {
     const passwordMatch = await bcrypt.compare(password, admin?.passwordHash ?? dummyHash);
 
     if (!admin || !passwordMatch) {
+      const failedAttempt = recordLoginFailure(throttleKey);
+      if (!failedAttempt.allowed) {
+        return jsonResponse(
+          { ok: false, message: "Too many login attempts. Please try again later." },
+          429,
+          { ...headers, "Retry-After": String(failedAttempt.retryAfterSeconds) }
+        );
+      }
       return jsonResponse({ ok: false, message: "Invalid credentials." }, 401, headers);
     }
 
+    clearLoginFailures(throttleKey);
     const token = signAdminToken(admin.email);
     return jsonResponse({ ok: true, token }, 200, headers);
   } catch (err) {
