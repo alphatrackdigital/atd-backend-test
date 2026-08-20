@@ -16,12 +16,22 @@ const crmConfig = {
   taskTypeId: "68bf7ba1f6e11688cf7a215e",
 };
 
-class RetryableStepError extends Error {
+class DefiniteStepError extends Error {
   constructor(message) {
     super(message);
-    this.name = "RetryableStepError";
+    this.name = "DefiniteStepError";
   }
 }
+
+const throwForProviderResponse = (provider, status) => {
+  // A timeout or server error may arrive after a non-idempotent provider write
+  // was committed. Keep the durable step `started` so it cannot be replayed.
+  if (status === 408 || status >= 500) {
+    throw new Error(`${provider} outcome is ambiguous (status ${status}).`);
+  }
+
+  throw new DefiniteStepError(`${provider} rejected the request with status ${status}.`);
+};
 
 const json = (payload, init = {}) =>
   new Response(JSON.stringify(payload), {
@@ -200,16 +210,16 @@ const getStringAttribute = (contact, name) => {
 
 const createBrevoContact = async (payload) => {
   const brevoApiKey = getEnv("BREVO_API_KEY");
-  if (!brevoApiKey) throw new RetryableStepError("Brevo booking contact service is not configured.");
+  if (!brevoApiKey) throw new DefiniteStepError("Brevo booking contact service is not configured.");
 
   const email = findFirstString(payload, ["EMAIL", "email"]);
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    throw new RetryableStepError("Brevo booking contact payload is invalid.");
+    throw new DefiniteStepError("Brevo booking contact payload is invalid.");
   }
 
   const listId = Number(getEnv("BREVO_STRATEGY_CALL_LIST_ID") || "7");
   if (!Number.isInteger(listId) || listId <= 0) {
-    throw new RetryableStepError("Brevo booking list is not configured.");
+    throw new DefiniteStepError("Brevo booking list is not configured.");
   }
 
   const firstName = findFirstString(payload, ["firstName", "first_name", "FIRSTNAME", "attendee_first_name"]);
@@ -258,13 +268,13 @@ const createBrevoContact = async (payload) => {
   });
 
   if (!response.ok) {
-    throw new RetryableStepError(`Brevo rejected the booking contact with status ${response.status}.`);
+    throwForProviderResponse("Brevo booking contact", response.status);
   }
 
   const contact = await response.clone().json().catch(() => ({}));
 
   const contactId = contact.id || existingContact?.id || (await getBrevoContactByEmail(normalizedEmail, brevoApiKey))?.id;
-  if (!contactId) throw new RetryableStepError("Brevo booking contact response did not include an id.");
+  if (!contactId) throw new Error("Brevo booking contact outcome is ambiguous because no contact id was returned.");
   return contactId;
 };
 
@@ -287,7 +297,7 @@ const buildBookingNotificationRows = (payload, meetingParams) => {
 
 const createBookingCrmDeal = async (payload, meetingParams, contactId) => {
   const brevoApiKey = getEnv("BREVO_API_KEY");
-  if (!brevoApiKey || !contactId) throw new RetryableStepError("Brevo CRM deal prerequisites are unavailable.");
+  if (!brevoApiKey || !contactId) throw new DefiniteStepError("Brevo CRM deal prerequisites are unavailable.");
 
   const firstName = findFirstString(payload, ["firstName", "first_name", "FIRSTNAME", "attendee_first_name"]);
   const lastName = findFirstString(payload, ["lastName", "last_name", "LASTNAME", "attendee_last_name"]);
@@ -314,18 +324,18 @@ const createBookingCrmDeal = async (payload, meetingParams, contactId) => {
   });
 
   if (!dealResponse.ok) {
-    throw new RetryableStepError(`Brevo CRM booking deal creation failed with status ${dealResponse.status}.`);
+    throwForProviderResponse("Brevo CRM booking deal creation", dealResponse.status);
   }
 
   const deal = await dealResponse.json().catch(() => ({}));
-  if (!deal.id) throw new RetryableStepError("Brevo CRM booking deal response did not include an id.");
+  if (!deal.id) throw new Error("Brevo CRM booking deal outcome is ambiguous because no deal id was returned.");
   return deal.id;
 };
 
 const createBookingCrmTask = async (payload, meetingParams, contactId, dealId) => {
   const brevoApiKey = getEnv("BREVO_API_KEY");
   if (!brevoApiKey || !contactId || !dealId) {
-    throw new RetryableStepError("Brevo CRM task prerequisites are unavailable.");
+    throw new DefiniteStepError("Brevo CRM task prerequisites are unavailable.");
   }
 
   const firstName = findFirstString(payload, ["firstName", "first_name", "FIRSTNAME", "attendee_first_name"]);
@@ -348,7 +358,7 @@ const createBookingCrmTask = async (payload, meetingParams, contactId, dealId) =
   });
 
   if (!taskResponse.ok) {
-    throw new RetryableStepError(`Brevo CRM booking task creation failed with status ${taskResponse.status}.`);
+    throwForProviderResponse("Brevo CRM booking task creation", taskResponse.status);
   }
 };
 
@@ -357,7 +367,7 @@ const escapeHtml = (value) =>
 
 const sendBookingInternalNotification = async (payload, meetingParams) => {
   const brevoApiKey = getEnv("BREVO_API_KEY");
-  if (!brevoApiKey) throw new RetryableStepError("Brevo booking notification service is not configured.");
+  if (!brevoApiKey) throw new DefiniteStepError("Brevo booking notification service is not configured.");
 
   const rows = buildBookingNotificationRows(payload, meetingParams);
   const textContent = ["Strategy call booking", "", ...rows.map(([label, value]) => `${label}: ${value}`)].join("\n");
@@ -388,7 +398,7 @@ const sendBookingInternalNotification = async (payload, meetingParams) => {
   });
 
   if (!response.ok) {
-    throw new RetryableStepError(`Brevo rejected the booking notification with status ${response.status}.`);
+    throwForProviderResponse("Brevo booking notification", response.status);
   }
 };
 
@@ -397,7 +407,7 @@ const sendGa4Event = async (payload, meetingParams) => {
   const apiSecret = getEnv("GA4_MEASUREMENT_PROTOCOL_API_SECRET");
 
   if (!measurementId || !apiSecret) {
-    throw new RetryableStepError("GA4 Measurement Protocol is not configured.");
+    throw new DefiniteStepError("GA4 Measurement Protocol is not configured.");
   }
 
   const eventName = getEnv("GA4_MEETING_BOOKED_EVENT_NAME") || DEFAULT_EVENT_NAME;
@@ -426,7 +436,7 @@ const sendGa4Event = async (payload, meetingParams) => {
   );
 
   if (!response.ok) {
-    throw new RetryableStepError(`GA4 rejected the booking event with status ${response.status}.`);
+    throwForProviderResponse("GA4 booking event", response.status);
   }
 
   console.info("Brevo meeting booking sent to GA4.", {
@@ -492,7 +502,7 @@ const sendMetaBookingEvent = async (payload, request, meetingParams) => {
   );
 
   if (!response.ok) {
-    throw new RetryableStepError(`Meta CAPI rejected the booking event with status ${response.status}.`);
+    throwForProviderResponse("Meta CAPI booking event", response.status);
   }
 };
 
@@ -604,7 +614,7 @@ export default async (request) => {
         return state.steps?.[step];
       }
 
-      if (error instanceof RetryableStepError) {
+      if (error instanceof DefiniteStepError) {
         try {
           await persistStep(step, "failed");
         } catch {

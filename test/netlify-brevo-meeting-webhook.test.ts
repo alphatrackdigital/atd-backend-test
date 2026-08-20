@@ -50,9 +50,19 @@ const installDurableStore = (options: { failGet?: boolean; failSetAt?: number } 
   return store;
 };
 
-const installSuccessfulFetch = (options: { ga4Failures?: number; dealFailures?: number } = {}) => {
+const installSuccessfulFetch = (options: {
+  ga4Failures?: number;
+  ga4FailureStatus?: number;
+  dealFailures?: number;
+  dealFailureStatus?: number;
+  dealNetworkFailures?: number;
+  taskFailures?: number;
+  taskFailureStatus?: number;
+} = {}) => {
   let ga4Failures = options.ga4Failures ?? 0;
   let dealFailures = options.dealFailures ?? 0;
+  let dealNetworkFailures = options.dealNetworkFailures ?? 0;
+  let taskFailures = options.taskFailures ?? 0;
   const fetchMock = vi.fn().mockImplementation((url: string) => {
     if (url === "https://api.brevo.com/v3/contacts/visitor%40example.com") {
       return Promise.resolve(new Response(JSON.stringify({ id: 321 }), { status: 200 }));
@@ -61,19 +71,27 @@ const installSuccessfulFetch = (options: { ga4Failures?: number; dealFailures?: 
       return Promise.resolve(new Response(JSON.stringify({ id: 321 }), { status: 201 }));
     }
     if (url === "https://api.brevo.com/v3/crm/deals") {
+      if (dealNetworkFailures > 0) {
+        dealNetworkFailures -= 1;
+        return Promise.reject(new Error("network unavailable"));
+      }
       if (dealFailures > 0) {
         dealFailures -= 1;
-        return Promise.resolve(new Response(null, { status: 503 }));
+        return Promise.resolve(new Response(null, { status: options.dealFailureStatus ?? 400 }));
       }
       return Promise.resolve(new Response(JSON.stringify({ id: "deal-321" }), { status: 201 }));
     }
     if (url === "https://api.brevo.com/v3/crm/tasks") {
+      if (taskFailures > 0) {
+        taskFailures -= 1;
+        return Promise.resolve(new Response(null, { status: options.taskFailureStatus ?? 503 }));
+      }
       return Promise.resolve(new Response(JSON.stringify({ id: "task-321" }), { status: 201 }));
     }
     if (url.startsWith("https://www.google-analytics.com/mp/collect")) {
       if (ga4Failures > 0) {
         ga4Failures -= 1;
-        return Promise.resolve(new Response(null, { status: 503 }));
+        return Promise.resolve(new Response(null, { status: options.ga4FailureStatus ?? 400 }));
       }
       return Promise.resolve(new Response(null, { status: 204 }));
     }
@@ -348,7 +366,7 @@ describe("brevo meeting webhook function", () => {
     expect(callsTo(fetchMock, "https://api.brevo.com/v3/smtp/email")).toHaveLength(1);
   });
 
-  it("recovers CRM on retry without repeating completed analytics or notification", async () => {
+  it("retries a definite CRM 400 rejection without repeating completed analytics or notification", async () => {
     const fetchMock = installSuccessfulFetch({ dealFailures: 1 });
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
@@ -367,6 +385,60 @@ describe("brevo meeting webhook function", () => {
       String(url).startsWith("https://www.google-analytics.com/mp/collect"),
     )).toHaveLength(1);
     expect(callsTo(fetchMock, "https://api.brevo.com/v3/smtp/email")).toHaveLength(1);
+  });
+
+  it("fails closed when CRM deal creation returns an ambiguous 503", async () => {
+    const fetchMock = installSuccessfulFetch({ dealFailures: 1, dealFailureStatus: 503 });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const firstResponse = await handler(buildRequest(bookedPayload));
+    expect(firstResponse.status).toBe(503);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/deals")).toHaveLength(1);
+    expect(Array.from(durableRecords.values())[0]).toMatchObject({
+      steps: { crmDeal: { status: "started" } },
+    });
+
+    const retryResponse = await handler(buildRequest(bookedPayload));
+    expect(retryResponse.status).toBe(503);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/deals")).toHaveLength(1);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/tasks")).toHaveLength(0);
+  });
+
+  it("does not replay a completed deal or an ambiguously failed task", async () => {
+    const fetchMock = installSuccessfulFetch({ taskFailures: 1, taskFailureStatus: 503 });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const firstResponse = await handler(buildRequest(bookedPayload));
+    expect(firstResponse.status).toBe(503);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/deals")).toHaveLength(1);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/tasks")).toHaveLength(1);
+    expect(Array.from(durableRecords.values())[0]).toMatchObject({
+      steps: {
+        crmDeal: { status: "completed", dealId: "deal-321" },
+        crmTask: { status: "started" },
+      },
+    });
+
+    const retryResponse = await handler(buildRequest(bookedPayload));
+    expect(retryResponse.status).toBe(503);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/deals")).toHaveLength(1);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/tasks")).toHaveLength(1);
+  });
+
+  it("fails closed when CRM deal creation has a network failure", async () => {
+    const fetchMock = installSuccessfulFetch({ dealNetworkFailures: 1 });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const firstResponse = await handler(buildRequest(bookedPayload));
+    expect(firstResponse.status).toBe(503);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/deals")).toHaveLength(1);
+    expect(Array.from(durableRecords.values())[0]).toMatchObject({
+      steps: { crmDeal: { status: "started" } },
+    });
+
+    const retryResponse = await handler(buildRequest(bookedPayload));
+    expect(retryResponse.status).toBe(503);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/deals")).toHaveLength(1);
   });
 
   it("makes a fully completed duplicate delivery side-effect free", async () => {
