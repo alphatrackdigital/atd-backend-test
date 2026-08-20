@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import handler from "../netlify/functions/brevo-meeting-webhook.mjs";
-import { resetIdempotencyForTests } from "../netlify/functions/lib/idempotency.mjs";
+import {
+  resetIdempotencyForTests,
+  setDurableIdempotencyStoreForTests,
+} from "../netlify/functions/lib/idempotency.mjs";
 
 const webhookUrl = "https://alphatrack.digital/api/brevo-meeting-webhook?token=test-webhook-secret";
 
@@ -28,10 +31,75 @@ const bookedPayload = {
   meeting_start_timestamp: "2026-05-28T08:00:00.000Z",
 };
 
+const durableRecords = new Map<string, unknown>();
+
+const installDurableStore = (options: { failGet?: boolean; failSetAt?: number } = {}) => {
+  let setCount = 0;
+  const store = {
+    get: vi.fn(async (key: string) => {
+      if (options.failGet) throw new Error("store unavailable");
+      return structuredClone(durableRecords.get(key) ?? null);
+    }),
+    setJSON: vi.fn(async (key: string, value: unknown) => {
+      setCount += 1;
+      if (setCount === options.failSetAt) throw new Error("store unavailable");
+      durableRecords.set(key, structuredClone(value));
+    }),
+  };
+  setDurableIdempotencyStoreForTests(store);
+  return store;
+};
+
+const installSuccessfulFetch = (options: { ga4Failures?: number; dealFailures?: number } = {}) => {
+  let ga4Failures = options.ga4Failures ?? 0;
+  let dealFailures = options.dealFailures ?? 0;
+  const fetchMock = vi.fn().mockImplementation((url: string) => {
+    if (url === "https://api.brevo.com/v3/contacts/visitor%40example.com") {
+      return Promise.resolve(new Response(JSON.stringify({ id: 321 }), { status: 200 }));
+    }
+    if (url === "https://api.brevo.com/v3/contacts") {
+      return Promise.resolve(new Response(JSON.stringify({ id: 321 }), { status: 201 }));
+    }
+    if (url === "https://api.brevo.com/v3/crm/deals") {
+      if (dealFailures > 0) {
+        dealFailures -= 1;
+        return Promise.resolve(new Response(null, { status: 503 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ id: "deal-321" }), { status: 201 }));
+    }
+    if (url === "https://api.brevo.com/v3/crm/tasks") {
+      return Promise.resolve(new Response(JSON.stringify({ id: "task-321" }), { status: 201 }));
+    }
+    if (url.startsWith("https://www.google-analytics.com/mp/collect")) {
+      if (ga4Failures > 0) {
+        ga4Failures -= 1;
+        return Promise.resolve(new Response(null, { status: 503 }));
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
+    if (url.startsWith("https://graph.facebook.com/")) {
+      return Promise.resolve(new Response(JSON.stringify({ events_received: 1 }), { status: 200 }));
+    }
+    if (url === "https://api.brevo.com/v3/smtp/email") {
+      return Promise.resolve(new Response(JSON.stringify({ messageId: "message-321" }), { status: 201 }));
+    }
+    return Promise.resolve(new Response(null, { status: 404 }));
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+};
+
+const callsTo = (fetchMock: ReturnType<typeof vi.fn>, url: string) =>
+  fetchMock.mock.calls.filter(([calledUrl]) => String(calledUrl) === url);
+
 describe("brevo meeting webhook function", () => {
   beforeEach(() => {
     resetIdempotencyForTests();
+    durableRecords.clear();
+    installDurableStore();
     process.env.BREVO_MEETING_WEBHOOK_SECRET = "test-webhook-secret";
+    process.env.BREVO_API_KEY = "test-api-key";
+    process.env.BREVO_STRATEGY_CALL_LIST_ID = "7";
     process.env.GA4_MEASUREMENT_ID = "G-TEST1234";
     process.env.GA4_MEASUREMENT_PROTOCOL_API_SECRET = "ga4-secret";
   });
@@ -43,6 +111,7 @@ describe("brevo meeting webhook function", () => {
     delete process.env.GA4_MEASUREMENT_PROTOCOL_API_SECRET;
     delete process.env.GA4_MEASUREMENT_PROTOCOL_DEBUG_MODE;
     delete process.env.BREVO_API_KEY;
+    delete process.env.BREVO_STRATEGY_CALL_LIST_ID;
   });
 
   it("rejects unsigned webhook requests", async () => {
@@ -60,13 +129,12 @@ describe("brevo meeting webhook function", () => {
   });
 
   it("tracks Brevo meeting bookings in GA4 without sending participant PII", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
-    vi.stubGlobal("fetch", fetchMock);
+    const fetchMock = installSuccessfulFetch();
 
     const response = await handler(buildRequest(bookedPayload));
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, crm: false, duplicate: false });
+    await expect(response.json()).resolves.toEqual({ ok: true, crm: true, duplicate: false });
     expect(fetchMock).toHaveBeenCalledWith(
       "https://www.google-analytics.com/mp/collect?measurement_id=G-TEST1234&api_secret=ga4-secret",
       expect.objectContaining({
@@ -75,7 +143,9 @@ describe("brevo meeting webhook function", () => {
       }),
     );
 
-    const [, init] = fetchMock.mock.calls[0];
+    const [, init] = fetchMock.mock.calls.find(([url]) =>
+      String(url).startsWith("https://www.google-analytics.com/mp/collect"),
+    )!;
     const body = JSON.parse(init.body);
 
     expect(body).toMatchObject({
@@ -105,9 +175,7 @@ describe("brevo meeting webhook function", () => {
   });
 
   it("sends an internal sales alert for real strategy call bookings", async () => {
-    process.env.BREVO_API_KEY = "test-api-key";
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
-    vi.stubGlobal("fetch", fetchMock);
+    const fetchMock = installSuccessfulFetch();
 
     const response = await handler(buildRequest(bookedPayload));
 
@@ -199,29 +267,29 @@ describe("brevo meeting webhook function", () => {
 
     const response = await handler(buildRequest(bookedPayload));
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ ok: true, crm: false, duplicate: false });
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({ ok: false, crm: false, duplicate: false });
     expect(errorSpy).toHaveBeenCalledWith(
-      "Brevo meeting booking CRM handoff failed.",
-      expect.objectContaining({ message: expect.stringContaining("deal creation failed") }),
+      "Brevo meeting booking processing incomplete.",
+      expect.objectContaining({ failed_steps: expect.arrayContaining([expect.objectContaining({ step: "crmDeal" })]) }),
     );
   });
 
   it("adds debug_mode only when explicitly enabled", async () => {
     process.env.GA4_MEASUREMENT_PROTOCOL_DEBUG_MODE = "true";
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
-    vi.stubGlobal("fetch", fetchMock);
+    const fetchMock = installSuccessfulFetch();
 
     await handler(buildRequest(bookedPayload));
 
-    const [, init] = fetchMock.mock.calls[0];
+    const [, init] = fetchMock.mock.calls.find(([url]) =>
+      String(url).startsWith("https://www.google-analytics.com/mp/collect"),
+    )!;
     const body = JSON.parse(init.body);
     expect(body.events[0].params.debug_mode).toBe(true);
   });
 
   it("does not send duplicate booking conversions to GA4", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
-    vi.stubGlobal("fetch", fetchMock);
+    const fetchMock = installSuccessfulFetch();
 
     const firstResponse = await handler(buildRequest(bookedPayload));
     await expect(firstResponse.json()).resolves.toMatchObject({ ok: true, duplicate: false });
@@ -233,6 +301,126 @@ describe("brevo meeting webhook function", () => {
       String(url).startsWith("https://www.google-analytics.com/mp/collect"),
     );
     expect(ga4Calls).toHaveLength(1);
+  });
+
+  it("accepts the supported header authentication", async () => {
+    installSuccessfulFetch();
+    const response = await handler(
+      new Request("https://alphatrack.digital/api/brevo-meeting-webhook", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-atd-webhook-secret": "test-webhook-secret",
+        },
+        body: JSON.stringify(bookedPayload),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, crm: true, duplicate: false });
+  });
+
+  it("retains the historical Meetings query-token fallback", async () => {
+    installSuccessfulFetch();
+    const response = await handler(buildRequest(bookedPayload));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, crm: true, duplicate: false });
+  });
+
+  it("does not repeat CRM when GA4 fails after CRM succeeds and delivery is retried", async () => {
+    const fetchMock = installSuccessfulFetch({ ga4Failures: 1 });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const firstResponse = await handler(buildRequest(bookedPayload));
+    expect(firstResponse.status).toBe(503);
+    await expect(firstResponse.json()).resolves.toMatchObject({ ok: false, crm: true });
+
+    const retryResponse = await handler(buildRequest(bookedPayload));
+    expect(retryResponse.status).toBe(200);
+    await expect(retryResponse.json()).resolves.toEqual({ ok: true, crm: true, duplicate: true });
+
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/contacts")).toHaveLength(1);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/deals")).toHaveLength(1);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/tasks")).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) =>
+      String(url).startsWith("https://www.google-analytics.com/mp/collect"),
+    )).toHaveLength(2);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/smtp/email")).toHaveLength(1);
+  });
+
+  it("recovers CRM on retry without repeating completed analytics or notification", async () => {
+    const fetchMock = installSuccessfulFetch({ dealFailures: 1 });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const firstResponse = await handler(buildRequest(bookedPayload));
+    expect(firstResponse.status).toBe(503);
+    await expect(firstResponse.json()).resolves.toMatchObject({ ok: false, crm: false });
+
+    const retryResponse = await handler(buildRequest(bookedPayload));
+    expect(retryResponse.status).toBe(200);
+    await expect(retryResponse.json()).resolves.toEqual({ ok: true, crm: true, duplicate: true });
+
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/contacts")).toHaveLength(1);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/deals")).toHaveLength(2);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/tasks")).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) =>
+      String(url).startsWith("https://www.google-analytics.com/mp/collect"),
+    )).toHaveLength(1);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/smtp/email")).toHaveLength(1);
+  });
+
+  it("makes a fully completed duplicate delivery side-effect free", async () => {
+    process.env.META_PIXEL_ID = "test-pixel";
+    process.env.META_CAPI_ACCESS_TOKEN = "test-meta-token";
+    const fetchMock = installSuccessfulFetch();
+    const firstResponse = await handler(buildRequest(bookedPayload));
+    expect(firstResponse.status).toBe(200);
+    const callsAfterSuccess = fetchMock.mock.calls.length;
+
+    const duplicateResponse = await handler(buildRequest(bookedPayload));
+    expect(duplicateResponse.status).toBe(200);
+    await expect(duplicateResponse.json()).resolves.toEqual({ ok: true, crm: true, duplicate: true });
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterSuccess);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/contacts")).toHaveLength(1);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/deals")).toHaveLength(1);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/tasks")).toHaveLength(1);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/smtp/email")).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).startsWith("https://graph.facebook.com/"))).toHaveLength(1);
+  });
+
+  it("fails before side effects when durable idempotency lookup is unavailable", async () => {
+    installDurableStore({ failGet: true });
+    const fetchMock = installSuccessfulFetch();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await handler(buildRequest(bookedPayload));
+    expect(response.status).toBe(503);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fails before a side effect when its started checkpoint cannot be stored", async () => {
+    installDurableStore({ failSetAt: 1 });
+    const fetchMock = installSuccessfulFetch();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await handler(buildRequest(bookedPayload));
+    expect(response.status).toBe(503);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/contacts")).toHaveLength(0);
+  });
+
+  it("fails closed after a side effect whose completion checkpoint cannot be stored", async () => {
+    installDurableStore({ failSetAt: 2 });
+    const fetchMock = installSuccessfulFetch();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const firstResponse = await handler(buildRequest(bookedPayload));
+    expect(firstResponse.status).toBe(503);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/contacts")).toHaveLength(1);
+
+    const retryResponse = await handler(buildRequest(bookedPayload));
+    expect(retryResponse.status).toBe(503);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/contacts")).toHaveLength(1);
+    expect(callsTo(fetchMock, "https://api.brevo.com/v3/crm/deals")).toHaveLength(0);
   });
 
   it("ignores cancel-style payloads", async () => {
@@ -251,16 +439,15 @@ describe("brevo meeting webhook function", () => {
 
   it("returns a configuration error when GA4 Measurement Protocol is missing", async () => {
     delete process.env.GA4_MEASUREMENT_PROTOCOL_API_SECRET;
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
+    installSuccessfulFetch();
 
     const response = await handler(buildRequest(bookedPayload));
 
-    expect(response.status).toBe(500);
-    await expect(response.json()).resolves.toEqual({
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
       ok: false,
-      message: "GA4 Measurement Protocol is not configured.",
+      crm: true,
+      message: "Booking processing is incomplete; retry required.",
     });
-    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
