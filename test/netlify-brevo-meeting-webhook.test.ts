@@ -66,7 +66,7 @@ describe("brevo meeting webhook function", () => {
     const response = await handler(buildRequest(bookedPayload));
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, crm: true, duplicate: false });
+    await expect(response.json()).resolves.toEqual({ ok: true, crm: false, duplicate: false });
     expect(fetchMock).toHaveBeenCalledWith(
       "https://www.google-analytics.com/mp/collect?measurement_id=G-TEST1234&api_secret=ga4-secret",
       expect.objectContaining({
@@ -128,7 +128,6 @@ describe("brevo meeting webhook function", () => {
 
   it("looks up an existing Brevo contact before CRM handoff when booking upsert does not return an id", async () => {
     process.env.BREVO_API_KEY = "test-api-key";
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const fetchMock = vi.fn().mockImplementation((url: string) => {
       if (url.startsWith("https://www.google-analytics.com/mp/collect")) {
         return Promise.resolve(new Response(null, { status: 204 }));
@@ -136,10 +135,6 @@ describe("brevo meeting webhook function", () => {
 
       if (url === "https://api.brevo.com/v3/contacts") {
         return Promise.resolve(new Response(null, { status: 204 }));
-      }
-
-      if (url === "https://api.brevo.com/v3/contacts/lists/7/contacts/add") {
-        return Promise.resolve(new Response(JSON.stringify({ code: "already_in_list" }), { status: 400 }));
       }
 
       if (url === "https://api.brevo.com/v3/contacts/visitor%40example.com") {
@@ -172,6 +167,10 @@ describe("brevo meeting webhook function", () => {
     );
     expect(contactLookupCall).toBeTruthy();
 
+    const contactUpsertCall = fetchMock.mock.calls.find(([url]) => url === "https://api.brevo.com/v3/contacts");
+    expect(JSON.parse(contactUpsertCall![1].body)).toMatchObject({ listIds: [7], updateEnabled: true });
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/contacts/lists/"))).toBe(false);
+
     const dealCall = fetchMock.mock.calls.find(([url]) => url === "https://api.brevo.com/v3/crm/deals");
     expect(dealCall).toBeTruthy();
     const [dealUrl, dealInit] = dealCall!;
@@ -183,9 +182,28 @@ describe("brevo meeting webhook function", () => {
         deal_stage: "bc2f86a0-8374-479f-bd43-27675c04e31a",
       },
     });
-    expect(warnSpy).toHaveBeenCalledWith(
-      "Brevo booking list membership call failed after contact upsert",
-      expect.objectContaining({ listId: 7 }),
+  });
+
+  it("reports CRM failure without failing an authenticated booking webhook", async () => {
+    process.env.BREVO_API_KEY = "test-api-key";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.startsWith("https://www.google-analytics.com/mp/collect")) return Promise.resolve(new Response(null, { status: 204 }));
+      if (url === "https://api.brevo.com/v3/contacts/visitor%40example.com") return Promise.resolve(new Response(JSON.stringify({ id: 321 }), { status: 200 }));
+      if (url === "https://api.brevo.com/v3/contacts") return Promise.resolve(new Response(JSON.stringify({ id: 321 }), { status: 201 }));
+      if (url === "https://api.brevo.com/v3/crm/deals") return Promise.resolve(new Response(JSON.stringify({ message: "plan limit" }), { status: 400 }));
+      if (url === "https://api.brevo.com/v3/smtp/email") return Promise.resolve(new Response(JSON.stringify({ messageId: "message-321" }), { status: 201 }));
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await handler(buildRequest(bookedPayload));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true, crm: false, duplicate: false });
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Brevo meeting booking CRM handoff failed.",
+      expect.objectContaining({ message: expect.stringContaining("deal creation failed") }),
     );
   });
 

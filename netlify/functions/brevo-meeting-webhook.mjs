@@ -247,23 +247,6 @@ const createBrevoContact = async (payload) => {
 
   const contact = await response.clone().json().catch(() => ({}));
 
-  const listResponse = await fetch(`https://api.brevo.com/v3/contacts/lists/${listId}/contacts/add`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "api-key": brevoApiKey,
-    },
-    body: JSON.stringify({ emails: [normalizedEmail] }),
-  });
-
-  if (!listResponse.ok) {
-    const errorText = await listResponse.text();
-    console.warn("Brevo booking list membership call failed after contact upsert", {
-      listId,
-      message: errorText.slice(0, 180),
-    });
-  }
-
   return contact.id || existingContact?.id || (await getBrevoContactByEmail(normalizedEmail, brevoApiKey))?.id;
 };
 
@@ -313,8 +296,7 @@ const createBookingCrmHandoff = async (payload, meetingParams, contactId) => {
   });
 
   if (!dealResponse.ok) {
-    const errorText = await dealResponse.text();
-    throw new Error(`Brevo CRM booking deal creation failed. ${errorText.slice(0, 180)}`);
+    throw new Error(`Brevo CRM booking deal creation failed with status ${dealResponse.status}.`);
   }
 
   const deal = await dealResponse.json().catch(() => ({}));
@@ -334,8 +316,7 @@ const createBookingCrmHandoff = async (payload, meetingParams, contactId) => {
   });
 
   if (!taskResponse.ok) {
-    const errorText = await taskResponse.text();
-    throw new Error(`Brevo CRM booking task creation failed. ${errorText.slice(0, 180)}`);
+    throw new Error(`Brevo CRM booking task creation failed with status ${taskResponse.status}.`);
   }
 };
 
@@ -521,9 +502,11 @@ export default async (request) => {
   const [ga4Result, metaResult, brevoResult, notificationResult] = await Promise.allSettled([
     isDuplicate ? Promise.resolve() : sendGa4Event(payload, meetingParams),
     isDuplicate ? Promise.resolve() : sendMetaBookingEvent(payload, request, meetingParams),
-    createBrevoContact(payload)
-      .then((contactId) => (isDuplicate ? undefined : createBookingCrmHandoff(payload, meetingParams, contactId)))
-      .catch(() => null), // CRM write is best-effort.
+    createBrevoContact(payload).then(async (contactId) => {
+      if (!contactId) return false;
+      if (!isDuplicate) await createBookingCrmHandoff(payload, meetingParams, contactId);
+      return true;
+    }),
     isDuplicate ? Promise.resolve() : sendBookingInternalNotification(payload, meetingParams),
   ]);
 
@@ -540,6 +523,11 @@ export default async (request) => {
     console.error("Brevo meeting booking Meta CAPI tracking failed.", { message });
   }
 
+  if (brevoResult.status === "rejected") {
+    const message = brevoResult.reason instanceof Error ? brevoResult.reason.message : "Brevo CRM handoff failed.";
+    console.error("Brevo meeting booking CRM handoff failed.", { message });
+  }
+
   if (!isDuplicate) {
     await markIdempotencyKey(dedupeKey, {
       source: "brevo_meetings_webhook",
@@ -553,7 +541,7 @@ export default async (request) => {
     console.error("Brevo meeting booking notification failed.", { message });
   }
 
-  const brevoOk = brevoResult.status === "fulfilled";
+  const brevoOk = brevoResult.status === "fulfilled" && brevoResult.value === true;
   return json({ ok: true, crm: brevoOk, duplicate: isDuplicate });
 };
 
