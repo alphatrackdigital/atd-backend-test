@@ -1,24 +1,12 @@
 import { buildLeadDedupeKey, getIdempotencyRecord, markIdempotencyKey } from "./lib/idempotency.mjs";
 import { createHash } from "node:crypto";
 import { saveLeadContact } from "./lib/contact-persistence.mjs";
+import { hasDisallowedBrowserOrigin, isAllowedBrowserOrigin } from "./lib/origin-policy.mjs";
 
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 8;
 const buckets = globalThis.__atdLeadRequestBuckets ?? new Map();
 globalThis.__atdLeadRequestBuckets = buckets;
-
-const allowedHostnames = new Set([
-  "alphatrack.digital",
-  "www.alphatrack.digital",
-  "alphatrackdigital.com",
-  "www.alphatrackdigital.com",
-  "alphatrackdigital.netlify.app",
-  "alphatra-serv.netlify.app",
-  "backend--alphatra-serv.netlify.app",
-  "website-internal-test.vercel.app",
-  "atd-website-test.vercel.app",
-  "atd-website-test-alphatrackdigitals-projects.vercel.app",
-]);
 
 const json = (payload, init = {}) =>
   new Response(JSON.stringify(payload), {
@@ -32,27 +20,13 @@ const getEnv = (name) => {
   return undefined;
 };
 
-const isAllowedOrigin = (origin) => {
-  if (!origin) return false;
-  try {
-    const url = new URL(origin);
-    return url.protocol === "https:" && (
-      allowedHostnames.has(url.hostname) ||
-      url.hostname.endsWith("-alphatrackdigitals-projects.vercel.app") ||
-      url.hostname.endsWith("--alphatrackdigital.netlify.app")
-    );
-  } catch {
-    return false;
-  }
-};
-
 const getCorsHeaders = (request) => {
   const origin = request.headers.get("origin");
   const headers = {
     "access-control-allow-methods": "POST, OPTIONS",
     "access-control-allow-headers": "Content-Type, Authorization",
   };
-  if (isAllowedOrigin(origin)) {
+  if (isAllowedBrowserOrigin(origin, getEnv("CONTEXT"), getEnv("ALLOWED_ORIGINS"))) {
     headers["access-control-allow-origin"] = origin;
     headers.vary = "Origin";
   }
@@ -345,21 +319,6 @@ const getBrevoContactByEmail = async (email, apiKey) => {
   return response.json().catch(() => undefined);
 };
 
-const ensureContactInList = async (email, listId, apiKey) => {
-  const response = await fetch(`https://api.brevo.com/v3/contacts/lists/${listId}/contacts/add`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "api-key": apiKey },
-    body: JSON.stringify({ emails: [email] }),
-  });
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.warn("Brevo list add failed after contact upsert", {
-      listId,
-      message: errorText.slice(0, 180),
-    });
-  }
-};
-
 const leadNotificationConfig = {
   contact_form: {
     senderEmail: "info@alphatrack.digital",
@@ -451,12 +410,21 @@ const createCrmDealAndTask = async (data, contactId, apiKey) => {
     }),
   });
 
+  let deal = {};
   if (!dealResponse.ok) {
     const errorText = await dealResponse.text();
-    throw new Error(`Brevo CRM deal creation failed. ${errorText.slice(0, 180)}`);
+    const isQuotaError = dealResponse.status === 400 && /check plan|max limit reached|quota/i.test(errorText);
+    if (!isQuotaError) {
+      throw new Error(`Brevo CRM deal creation failed with status ${dealResponse.status}.`);
+    }
+    console.warn("Brevo CRM deal quota reached; creating contact-linked task without a deal", {
+      source: data.source,
+      status: dealResponse.status,
+      reason: "deal_quota_reached",
+    });
+  } else {
+    deal = await dealResponse.json().catch(() => ({}));
   }
-
-  const deal = await dealResponse.json().catch(() => ({}));
   const taskResponse = await fetch("https://api.brevo.com/v3/crm/tasks", {
     method: "POST",
     headers: { "content-type": "application/json", "api-key": apiKey },
@@ -473,8 +441,7 @@ const createCrmDealAndTask = async (data, contactId, apiKey) => {
   });
 
   if (!taskResponse.ok) {
-    const errorText = await taskResponse.text();
-    throw new Error(`Brevo CRM task creation failed. ${errorText.slice(0, 180)}`);
+    throw new Error(`Brevo CRM task creation failed with status ${taskResponse.status}.`);
   }
 };
 
@@ -544,6 +511,10 @@ const sendInternalNotification = async (data, apiKey) => {
 export default async (request) => {
   const corsHeaders = getCorsHeaders(request);
 
+  if (hasDisallowedBrowserOrigin(request, getEnv("CONTEXT"), getEnv("ALLOWED_ORIGINS"))) {
+    return json({ ok: false, message: "Origin not allowed." }, { status: 403, headers: corsHeaders });
+  }
+
   if (request.method === "OPTIONS") {
     return new Response(null, {
       status: 204,
@@ -585,11 +556,11 @@ export default async (request) => {
   const dedupeKey = buildLeadDedupeKey(payload);
   const isDuplicate = Boolean(await getIdempotencyRecord(dedupeKey));
 
-  const providerErrorResponse = (errorText) => {
+  const providerErrorResponse = (status) => {
     console.error("Brevo lead capture failed", {
       source: payload.source,
       listId,
-      message: errorText.slice(0, 180),
+      status,
     });
     return json(
       { ok: false, message: "Unable to submit lead right now." },
@@ -635,19 +606,16 @@ export default async (request) => {
           body: JSON.stringify(toBrevoPayload(payload, listId, existingBrevoContact)),
         });
       } else {
-        return providerErrorResponse(errorText);
+        return providerErrorResponse(brevoResponse.status);
       }
     }
 
     if (!brevoResponse.ok) {
-      const errorText = await brevoResponse.text();
-      return providerErrorResponse(errorText);
+      return providerErrorResponse(brevoResponse.status);
     }
 
     const brevoContact = await brevoResponse.clone().json().catch(() => ({}));
     const brevoContactId = brevoContact.id || existingBrevoContact?.id || (await getBrevoContactByEmail(payload.email, brevoApiKey))?.id;
-    if (!pendingConfirmation) await ensureContactInList(payload.email, listId, brevoApiKey);
-
     if (!isDuplicate) {
       await saveLeadContact(
         payload,

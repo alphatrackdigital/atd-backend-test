@@ -29,12 +29,10 @@ const authenticate = (request) => {
   const secret = getEnv("BREVO_TRANSACTIONAL_WEBHOOK_SECRET");
   if (!secret) return false;
 
-  const url = new URL(request.url);
   const providedSecret =
     getBearerToken(request.headers.get("authorization")) ||
     request.headers.get("x-atd-webhook-secret") ||
-    request.headers.get("x-brevo-webhook-secret") ||
-    url.searchParams.get("token");
+    request.headers.get("x-brevo-webhook-secret");
 
   return providedSecret === secret;
 };
