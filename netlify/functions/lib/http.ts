@@ -1,27 +1,38 @@
-const defaultAllowedOrigins = new Set([
+const productionAllowedOrigins = new Set([
   "https://alphatrack.digital",
   "https://www.alphatrack.digital",
-  "https://alphatrackdigital.netlify.app",
-  "https://website-internal-test.vercel.app",
-  "https://atd-website-test.vercel.app",
 ]);
 
-function isAllowedOrigin(origin?: string) {
-  if (!origin) return false;
+const previewOriginSuffixes = [
+  "-alphatrackdigitals-projects.vercel.app",
+  "--alphatrackdigital.netlify.app",
+];
 
-  const configuredOrigins = String(process.env.ALLOWED_ORIGINS || "")
+function configuredOrigins() {
+  return String(process.env.ALLOWED_ORIGINS || "")
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+}
 
-  if (defaultAllowedOrigins.has(origin) || configuredOrigins.includes(origin)) return true;
+function isProductionContext() {
+  return process.env.CONTEXT === "production";
+}
+
+export function isAllowedBrowserOrigin(origin?: string) {
+  if (!origin) return false;
+
+  if (productionAllowedOrigins.has(origin)) return true;
+
+  // Production is intentionally closed to canonical live origins only.
+  // QA/test origins belong in ALLOWED_ORIGINS on non-production deploy contexts.
+  if (isProductionContext()) return false;
+
+  if (configuredOrigins().includes(origin)) return true;
 
   try {
     const { hostname, protocol } = new URL(origin);
-    return protocol === "https:" && (
-      hostname.endsWith("-alphatrackdigitals-projects.vercel.app") ||
-      hostname.endsWith("--alphatrackdigital.netlify.app")
-    );
+    return protocol === "https:" && previewOriginSuffixes.some((suffix) => hostname.endsWith(suffix));
   } catch {
     return false;
   }
@@ -34,7 +45,7 @@ export function corsHeaders(origin?: string) {
     "Content-Type": "application/json",
   };
 
-  if (isAllowedOrigin(origin)) {
+  if (isAllowedBrowserOrigin(origin)) {
     headers["Access-Control-Allow-Origin"] = origin as string;
     headers.Vary = "Origin";
   }
