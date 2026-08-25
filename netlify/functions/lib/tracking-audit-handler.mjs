@@ -332,6 +332,54 @@ const logNonFatal = (label, error) => {
   console.error(label, { message: error instanceof Error ? error.message : String(error) });
 };
 
+const runIdempotentAuditStep = async (dedupeKey, step, action, errorLabel) => {
+  const stepKey = `${dedupeKey}/${step}`;
+  if (await getIdempotencyRecord(stepKey)) return;
+
+  try {
+    await action();
+    await markIdempotencyKey(stepKey, { completed: true });
+  } catch (error) {
+    logNonFatal(errorLabel, error);
+  }
+};
+
+const completeAuditSideEffects = async (dedupeKey, data, audit, contactId, apiKey, request) => {
+  let resolvedContactId = contactId;
+  const taskKey = `${dedupeKey}/audit-review-task`;
+  if (!(await getIdempotencyRecord(taskKey)) && !resolvedContactId) {
+    resolvedContactId = (await getBrevoContactByEmail(data.email, apiKey))?.id;
+  }
+
+  await runIdempotentAuditStep(
+    dedupeKey,
+    "audit-review-task",
+    async () => {
+      if (!resolvedContactId) throw new Error("Brevo contact ID is unavailable for Tracking Audit review task.");
+      await createAuditReviewTask(data, audit, resolvedContactId, apiKey);
+    },
+    "Brevo Tracking Audit review task failed after successful capture",
+  );
+  await runIdempotentAuditStep(
+    dedupeKey,
+    "audit-internal-alert",
+    () => sendInternalNotification(data, audit, apiKey),
+    "Tracking Audit internal notification failed after successful capture",
+  );
+  await runIdempotentAuditStep(
+    dedupeKey,
+    "audit-applicant-receipt",
+    () => sendApplicantReceipt(data, apiKey),
+    "Tracking Audit applicant receipt failed after successful capture",
+  );
+  await runIdempotentAuditStep(
+    dedupeKey,
+    "audit-meta-capi",
+    () => sendMetaConversionEvent(data, request),
+    "Meta CAPI Tracking Audit lead event failed after successful capture",
+  );
+};
+
 export default async (request) => {
   const corsHeaders = getCorsHeaders(request);
   if (hasDisallowedBrowserOrigin(request, getEnv("CONTEXT"), getEnv("ALLOWED_ORIGINS"))) {
@@ -367,8 +415,14 @@ export default async (request) => {
   if (!apiKey) return json({ ok: false, message: "Lead service is not configured." }, { status: 500, headers: corsHeaders });
 
   const dedupeKey = buildLeadDedupeKey(payload);
-  const isDuplicate = Boolean(await getIdempotencyRecord(dedupeKey));
+  const existingSubmission = await getIdempotencyRecord(dedupeKey);
+  const isDuplicate = Boolean(existingSubmission);
   if (isDuplicate) {
+    const storedContactId = existingSubmission?.contactId;
+    const contactId = typeof storedContactId === "string" || typeof storedContactId === "number"
+      ? storedContactId
+      : undefined;
+    await completeAuditSideEffects(dedupeKey, payload, audit, contactId, apiKey, request);
     return json({ ok: true, pendingConfirmation: false, duplicate: true, metaEventId: payload.metaEventId }, { headers: corsHeaders });
   }
 
@@ -385,6 +439,7 @@ export default async (request) => {
       emailHash: dedupeKey.split("/").at(-1),
       listId: auditListId,
       auditMode: audit.mode,
+      ...(upsert.contactId ? { contactId: upsert.contactId } : {}),
     });
 
     await saveLeadContact({
@@ -406,10 +461,7 @@ export default async (request) => {
       logNonFatal("MongoDB Tracking Audit persistence failed after successful Brevo capture", error);
     });
 
-    await createAuditReviewTask(payload, audit, upsert.contactId, apiKey).catch((error) => logNonFatal("Brevo Tracking Audit review task failed after successful capture", error));
-    await sendInternalNotification(payload, audit, apiKey).catch((error) => logNonFatal("Tracking Audit internal notification failed after successful capture", error));
-    await sendApplicantReceipt(payload, apiKey).catch((error) => logNonFatal("Tracking Audit applicant receipt failed after successful capture", error));
-    await sendMetaConversionEvent(payload, request).catch((error) => logNonFatal("Meta CAPI Tracking Audit lead event failed after successful capture", error));
+    await completeAuditSideEffects(dedupeKey, payload, audit, upsert.contactId, apiKey, request);
 
     return json({ ok: true, pendingConfirmation: false, duplicate: false, metaEventId: payload.metaEventId }, { headers: corsHeaders });
   } catch (error) {

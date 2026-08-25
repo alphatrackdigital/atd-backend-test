@@ -484,6 +484,66 @@ const logNonFatal = (label: string, error: unknown) => {
   console.error(label, { message: error instanceof Error ? error.message : String(error) });
 };
 
+const runIdempotentAuditStep = async (
+  dedupeKey: string,
+  step: string,
+  action: () => Promise<void>,
+  errorLabel: string,
+) => {
+  const stepKey = `${dedupeKey}/${step}`;
+  if (await getIdempotencyRecord(stepKey)) return;
+
+  try {
+    await action();
+    await markIdempotencyKey(stepKey, { completed: true });
+  } catch (error) {
+    logNonFatal(errorLabel, error);
+  }
+};
+
+const completeAuditSideEffects = async (
+  dedupeKey: string,
+  data: TrackingAuditPayload,
+  audit: NormalizedTrackingAuditApplication,
+  contactId: number | string | undefined,
+  brevoApiKey: string,
+  req: Req,
+) => {
+  let resolvedContactId = contactId;
+  const taskKey = `${dedupeKey}/audit-review-task`;
+  if (!(await getIdempotencyRecord(taskKey)) && !resolvedContactId) {
+    resolvedContactId = (await getBrevoContactByEmail(data.email, brevoApiKey))?.id;
+  }
+
+  await runIdempotentAuditStep(
+    dedupeKey,
+    "audit-review-task",
+    async () => {
+      if (!resolvedContactId) throw new Error("Brevo contact ID is unavailable for Tracking Audit review task.");
+      await createAuditReviewTask(data, audit, resolvedContactId, brevoApiKey);
+    },
+    "Brevo Tracking Audit review task failed after successful capture",
+  );
+  await runIdempotentAuditStep(
+    dedupeKey,
+    "audit-internal-alert",
+    () => sendInternalNotification(data, audit, brevoApiKey),
+    "Tracking Audit internal notification failed after successful capture",
+  );
+  await runIdempotentAuditStep(
+    dedupeKey,
+    "audit-applicant-receipt",
+    () => sendApplicantReceipt(data, brevoApiKey),
+    "Tracking Audit applicant receipt failed after successful capture",
+  );
+  await runIdempotentAuditStep(
+    dedupeKey,
+    "audit-meta-capi",
+    () => sendMetaConversionEvent(data, req),
+    "Meta CAPI Tracking Audit lead event failed after successful capture",
+  );
+};
+
 const trackingAuditHandler = async (req: Req, res: Res) => {
   res.setHeader("Content-Type", "application/json");
   res.setHeader("Cache-Control", "no-store");
@@ -521,8 +581,14 @@ const trackingAuditHandler = async (req: Req, res: Res) => {
   }
 
   const dedupeKey = buildLeadDedupeKey(payload as unknown as Record<string, unknown>);
-  const isDuplicate = Boolean(await getIdempotencyRecord(dedupeKey));
+  const existingSubmission = await getIdempotencyRecord(dedupeKey);
+  const isDuplicate = Boolean(existingSubmission);
   if (isDuplicate) {
+    const storedContactId = existingSubmission?.contactId;
+    const contactId = typeof storedContactId === "string" || typeof storedContactId === "number"
+      ? storedContactId
+      : undefined;
+    await completeAuditSideEffects(dedupeKey, payload, audit, contactId, brevoApiKey, req);
     return res.status(200).json({ ok: true, pendingConfirmation: false, duplicate: true, metaEventId: payload.metaEventId });
   }
 
@@ -539,13 +605,11 @@ const trackingAuditHandler = async (req: Req, res: Res) => {
       emailHash: dedupeKey.split("/").at(-1),
       listId: auditListId,
       auditMode: audit.mode,
+      ...(upsert.contactId ? { contactId: upsert.contactId } : {}),
     });
 
     await saveAuditToMongoDB(payload, audit, ip);
-    await createAuditReviewTask(payload, audit, upsert.contactId, brevoApiKey).catch((error) => logNonFatal("Brevo Tracking Audit review task failed after successful capture", error));
-    await sendInternalNotification(payload, audit, brevoApiKey).catch((error) => logNonFatal("Tracking Audit internal notification failed after successful capture", error));
-    await sendApplicantReceipt(payload, brevoApiKey).catch((error) => logNonFatal("Tracking Audit applicant receipt failed after successful capture", error));
-    await sendMetaConversionEvent(payload, req).catch((error) => logNonFatal("Meta CAPI Tracking Audit lead event failed after successful capture", error));
+    await completeAuditSideEffects(dedupeKey, payload, audit, upsert.contactId, brevoApiKey, req);
 
     return res.status(200).json({ ok: true, pendingConfirmation: false, duplicate: false, metaEventId: payload.metaEventId });
   } catch (error) {

@@ -48,7 +48,9 @@ const legacyAudit = {
   adPlatforms: "Google Ads, Meta Ads",
 };
 
-const installProviderFetch = () => {
+const installProviderFetch = (options: { failReceiptOnce?: boolean; failTaskOnce?: boolean } = {}) => {
+  let receiptAttempts = 0;
+  let taskAttempts = 0;
   const fetchMock = vi.fn(async (url: string | URL | Request, init: RequestInit = {}) => {
     const target = String(url);
     const method = String(init.method || "GET").toUpperCase();
@@ -65,9 +67,16 @@ const installProviderFetch = () => {
       return new Response(JSON.stringify({ id: "deal-1" }), { status: 201 });
     }
     if (target === "https://api.brevo.com/v3/crm/tasks") {
+      taskAttempts += 1;
+      if (options.failTaskOnce && taskAttempts === 1) return new Response("", { status: 503 });
       return new Response(JSON.stringify({ id: "task-1" }), { status: 201 });
     }
     if (target === "https://api.brevo.com/v3/smtp/email") {
+      const body = JSON.parse(String(init.body));
+      if (body.subject === "We received your Tracking Audit application") {
+        receiptAttempts += 1;
+        if (options.failReceiptOnce && receiptAttempts === 1) return new Response("", { status: 503 });
+      }
       return new Response(JSON.stringify({ messageId: "message-1" }), { status: 201 });
     }
     if (target.includes("graph.facebook.com")) {
@@ -212,6 +221,44 @@ describe("Netlify leads application-first Tracking Audit flow", () => {
     expect(smtpBodies(fetchMock).filter((body) => body.subject === "New tracking audit application")).toHaveLength(1);
     expect(smtpBodies(fetchMock).filter((body) => body.subject === "We received your Tracking Audit application")).toHaveLength(1);
     expect(callsFor(fetchMock, "graph.facebook.com")).toHaveLength(1);
+  });
+
+  it("retries only a failed applicant receipt on duplicate submissions", async () => {
+    process.env.META_PIXEL_ID = "123456789";
+    process.env.META_CAPI_ACCESS_TOKEN = "meta-token";
+    const fetchMock = installProviderFetch({ failReceiptOnce: true });
+
+    const first = await handler(buildRequest(canonicalAudit));
+    await expect(first.json()).resolves.toMatchObject({ duplicate: false });
+    const second = await handler(buildRequest(canonicalAudit));
+    await expect(second.json()).resolves.toMatchObject({ duplicate: true });
+    const third = await handler(buildRequest(canonicalAudit));
+    await expect(third.json()).resolves.toMatchObject({ duplicate: true });
+
+    expect(callsFor(fetchMock, "/v3/contacts").filter(([, init]) => String((init as RequestInit).method).toUpperCase() === "POST")).toHaveLength(1);
+    expect(callsFor(fetchMock, "/crm/tasks")).toHaveLength(1);
+    expect(smtpBodies(fetchMock).filter((body) => body.subject === "New tracking audit application")).toHaveLength(1);
+    expect(smtpBodies(fetchMock).filter((body) => body.subject === "We received your Tracking Audit application")).toHaveLength(2);
+    expect(callsFor(fetchMock, "graph.facebook.com")).toHaveLength(1);
+    expect(callsFor(fetchMock, "/crm/deals")).toHaveLength(0);
+  });
+
+  it("retries only a failed review task on a duplicate submission", async () => {
+    process.env.META_PIXEL_ID = "123456789";
+    process.env.META_CAPI_ACCESS_TOKEN = "meta-token";
+    const fetchMock = installProviderFetch({ failTaskOnce: true });
+
+    const first = await handler(buildRequest(canonicalAudit));
+    await expect(first.json()).resolves.toMatchObject({ duplicate: false });
+    const second = await handler(buildRequest(canonicalAudit));
+    await expect(second.json()).resolves.toMatchObject({ duplicate: true });
+
+    expect(callsFor(fetchMock, "/v3/contacts").filter(([, init]) => String((init as RequestInit).method).toUpperCase() === "POST")).toHaveLength(1);
+    expect(callsFor(fetchMock, "/crm/tasks")).toHaveLength(2);
+    expect(smtpBodies(fetchMock).filter((body) => body.subject === "New tracking audit application")).toHaveLength(1);
+    expect(smtpBodies(fetchMock).filter((body) => body.subject === "We received your Tracking Audit application")).toHaveLength(1);
+    expect(callsFor(fetchMock, "graph.facebook.com")).toHaveLength(1);
+    expect(callsFor(fetchMock, "/crm/deals")).toHaveLength(0);
   });
 
   it("preserves contact-form Deal and Task behavior", async () => {
