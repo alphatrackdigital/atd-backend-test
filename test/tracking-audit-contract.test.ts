@@ -33,12 +33,9 @@ describe("Tracking Audit contract", () => {
     expect(result.value.adPlatforms).toEqual(["meta_ads", "google_ads"]);
   });
 
-  it("maps known legacy platform labels without translating legacy USD spend into a GHS band", () => {
+  it("maps legacy platform labels without translating USD spend into a GHS band", () => {
     const result = normalizeTrackingAuditApplication({
       source: "tracking_audit_offer",
-      firstName: "Ama",
-      lastName: "Mensah",
-      email: "ama@example.com",
       websiteUrl: "https://example.com",
       monthlyAdSpend: "$1k - $5k / mo",
       adPlatforms: "Meta Ads, Google Ads",
@@ -49,28 +46,27 @@ describe("Tracking Audit contract", () => {
     expect(result.value.legacyMonthlyAdSpend).toBe("$1k - $5k / mo");
     expect(result.value.monthlyAdSpendBand).toBe("");
     expect(result.value.adPlatforms).toEqual(["meta_ads", "google_ads"]);
+
+    const attrs = auditLifecycleAttributes(result.value, "2026-08-25T06:30:00.000Z");
+    expect(attrs.AUDIT_LEGACY_AD_SPEND).toBe("$1k - $5k / mo");
+    expect(attrs.AUDIT_STATUS).toBe("Manual Review");
+    expect(attrs.AUDIT_HANDOFF_STATUS).toBe("No Sales Handoff");
+    expect(attrs).not.toHaveProperty("AUDIT_AD_SPEND_BAND");
   });
 
   it("rejects unknown canonical enum values", () => {
-    const result = normalizeTrackingAuditApplication({
-      ...canonicalPayload,
-      industry: "made_up_industry",
-    });
+    const result = normalizeTrackingAuditApplication({ ...canonicalPayload, industry: "made_up_industry" });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.errors).toContain("industry");
   });
 
   it("rejects a canonical-shaped payload missing a required fit field", () => {
-    const result = normalizeTrackingAuditApplication({
-      ...canonicalPayload,
-      urgency: "",
-      monthlyAdSpend: "",
-    });
+    const result = normalizeTrackingAuditApplication({ ...canonicalPayload, urgency: "", monthlyAdSpend: "" });
     expect(result.ok).toBe(false);
   });
 
-  it("deduplicates channel codes and maps legacy labels", () => {
+  it("deduplicates canonical channel codes and legacy labels", () => {
     expect(normalizeAuditChannels(["meta_ads", "Meta Ads", "Google Ads", "google_ads"])).toEqual([
       "meta_ads",
       "google_ads",
@@ -86,20 +82,6 @@ describe("Tracking Audit contract", () => {
     expect(attrs.AUDIT_HANDOFF_STATUS).toBe("No Sales Handoff");
     expect(attrs.AUDIT_AD_SPEND_BAND).toBe("6000_14999");
     expect(attrs.AUDIT_PAID_CHANNELS).toEqual(["meta_ads", "google_ads"]);
-  });
-
-  it("routes legacy applications to Manual Review without fabricating a GHS spend band", () => {
-    const result = normalizeTrackingAuditApplication({
-      source: "tracking_audit_offer",
-      websiteUrl: "https://example.com",
-      monthlyAdSpend: "20k+ per month",
-      adPlatforms: "Meta Ads",
-    });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    const attrs = auditLifecycleAttributes(result.value, "2026-08-25T06:30:00.000Z");
-    expect(attrs.AUDIT_STATUS).toBe("Manual Review");
-    expect(attrs.AUDIT_HANDOFF_STATUS).toBe("No Sales Handoff");
-    expect(attrs).not.toHaveProperty("AUDIT_AD_SPEND_BAND");
+    expect(attrs).not.toHaveProperty("AUDIT_LEGACY_AD_SPEND");
   });
 });
