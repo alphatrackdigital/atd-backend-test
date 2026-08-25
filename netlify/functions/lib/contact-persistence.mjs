@@ -46,18 +46,22 @@ export const buildContactDocument = (payload, ip) => ({
   message: payload.message || "",
   websiteUrl: payload.websiteUrl || "",
   monthlyAdSpend: payload.monthlyAdSpend || "",
-  legacyMonthlyAdSpend: payload.legacyMonthlyAdSpend || "",
-  monthlyAdSpendBand: payload.monthlyAdSpendBand || "",
   adPlatforms: toStoredList(payload.adPlatforms),
-  industry: payload.industry || "",
-  role: payload.role || "",
-  decisionInfluence: payload.decisionInfluence || "",
-  trackingMaturity: payload.trackingMaturity || "",
-  primaryConversionType: payload.primaryConversionType || "",
-  measurementProblem: payload.measurementProblem || "",
-  urgency: payload.urgency || "",
   serviceInterest: toStoredList(payload.serviceInterest),
   monthlyBudget: payload.monthlyBudget || "",
+  ...(payload.source === "tracking_audit_offer"
+    ? {
+        legacyMonthlyAdSpend: payload.legacyMonthlyAdSpend || "",
+        monthlyAdSpendBand: payload.monthlyAdSpendBand || "",
+        industry: payload.industry || "",
+        role: payload.role || "",
+        decisionInfluence: payload.decisionInfluence || "",
+        trackingMaturity: payload.trackingMaturity || "",
+        primaryConversionType: payload.primaryConversionType || "",
+        measurementProblem: payload.measurementProblem || "",
+        urgency: payload.urgency || "",
+      }
+    : {}),
   ip,
 });
 
