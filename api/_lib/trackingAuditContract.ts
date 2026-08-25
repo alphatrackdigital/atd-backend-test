@@ -41,14 +41,7 @@ export const AUDIT_PAID_CHANNELS = [
   "none_currently",
 ] as const;
 
-export const AUDIT_TRACKING_MATURITY = [
-  "not_sure",
-  "basic",
-  "partial",
-  "disconnected",
-  "confident",
-] as const;
-
+export const AUDIT_TRACKING_MATURITY = ["not_sure", "basic", "partial", "disconnected", "confident"] as const;
 export const AUDIT_PRIMARY_CONVERSIONS = [
   "lead_form",
   "booked_call_appointment",
@@ -57,7 +50,6 @@ export const AUDIT_PRIMARY_CONVERSIONS = [
   "application_enrolment",
   "other",
 ] as const;
-
 export const AUDIT_MEASUREMENT_PROBLEMS = [
   "unclear_campaign_performance",
   "conflicting_numbers",
@@ -66,13 +58,7 @@ export const AUDIT_MEASUREMENT_PROBLEMS = [
   "browser_server_signal_gap",
   "other",
 ] as const;
-
-export const AUDIT_URGENCY = [
-  "before_scaling",
-  "within_30_days",
-  "one_to_three_months",
-  "exploring",
-] as const;
+export const AUDIT_URGENCY = ["before_scaling", "within_30_days", "one_to_three_months", "exploring"] as const;
 
 export type AuditApplicationMode = "canonical" | "legacy";
 
@@ -92,9 +78,7 @@ export interface NormalizedTrackingAuditApplication {
   urgency: string;
 }
 
-const asTrimmedString = (value: unknown) =>
-  typeof value === "string" ? value.trim() : "";
-
+const asTrimmedString = (value: unknown) => typeof value === "string" ? value.trim() : "";
 const unique = <T>(values: T[]) => [...new Set(values)];
 
 const LEGACY_CHANNEL_MAP: Record<string, string> = {
@@ -119,12 +103,7 @@ const PROBLEMS = canonicalSet(AUDIT_MEASUREMENT_PROBLEMS);
 const URGENCY = canonicalSet(AUDIT_URGENCY);
 
 export const normalizeAuditChannels = (value: unknown): string[] => {
-  const raw = Array.isArray(value)
-    ? value
-    : typeof value === "string"
-      ? value.split(/[,;]+/)
-      : [];
-
+  const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[,;]+/) : [];
   return unique(
     raw
       .map((item) => asTrimmedString(item))
@@ -135,16 +114,8 @@ export const normalizeAuditChannels = (value: unknown): string[] => {
 };
 
 const hasCanonicalFields = (data: Record<string, unknown>) =>
-  [
-    "company",
-    "industry",
-    "role",
-    "decisionInfluence",
-    "trackingMaturity",
-    "primaryConversionType",
-    "measurementProblem",
-    "urgency",
-  ].every((key) => asTrimmedString(data[key]).length > 0) &&
+  ["company", "industry", "role", "decisionInfluence", "trackingMaturity", "primaryConversionType", "measurementProblem", "urgency"]
+    .every((key) => asTrimmedString(data[key]).length > 0) &&
   (asTrimmedString(data.monthlyAdSpendBand).length > 0 || asTrimmedString(data.monthlyAdSpend).length > 0);
 
 export const normalizeTrackingAuditApplication = (
@@ -162,9 +133,11 @@ export const normalizeTrackingAuditApplication = (
   if (!canonical) {
     const legacySpend = asTrimmedString(data.monthlyAdSpend);
     if (!legacySpend || channels.length === 0) {
-      return { ok: false, errors: [!legacySpend ? "monthlyAdSpend" : "", channels.length === 0 ? "adPlatforms" : ""].filter(Boolean) };
+      return {
+        ok: false,
+        errors: [!legacySpend ? "monthlyAdSpend" : "", channels.length === 0 ? "adPlatforms" : ""].filter(Boolean),
+      };
     }
-
     return {
       ok: true,
       value: {
@@ -193,7 +166,6 @@ export const normalizeTrackingAuditApplication = (
   const primaryConversionType = asTrimmedString(data.primaryConversionType);
   const measurementProblem = asTrimmedString(data.measurementProblem);
   const urgency = asTrimmedString(data.urgency);
-
   const errors = [
     !company ? "company" : "",
     !INDUSTRIES.has(industry) ? "industry" : "",
@@ -206,7 +178,6 @@ export const normalizeTrackingAuditApplication = (
     !PROBLEMS.has(measurementProblem) ? "measurementProblem" : "",
     !URGENCY.has(urgency) ? "urgency" : "",
   ].filter(Boolean);
-
   if (errors.length > 0) return { ok: false, errors };
 
   return {
@@ -249,6 +220,7 @@ export const auditLifecycleAttributes = (
   AUDIT_APPLIED_AT: timestamp,
   ...(audit.mode === "legacy"
     ? {
+        AUDIT_LEGACY_AD_SPEND: audit.legacyMonthlyAdSpend,
         AUDIT_REVIEW_OUTCOME: "Manual Review",
         AUDIT_REVIEW_RATIONALE: "Legacy pre-v1.0 Tracking Audit application payload; structured qualification fields require review.",
       }
