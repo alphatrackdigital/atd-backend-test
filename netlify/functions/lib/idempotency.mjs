@@ -31,12 +31,40 @@ export const normalizeEmail = (value) => String(value || "").trim().toLowerCase(
 
 const normalizeString = (value) => String(value || "").trim().toLowerCase();
 
+const normalizeList = (value) => {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[,;]+/)
+      : [];
+  return [...new Set(values.map(normalizeString).filter(Boolean))].sort().join(",");
+};
+
 export const hashValue = (value) =>
   createHash("sha256").update(String(value)).digest("hex").slice(0, 32);
 
 const dayStamp = (date = new Date()) => date.toISOString().slice(0, 10);
 
 const safeKey = (parts) => parts.map((part) => String(part).replace(/[^a-zA-Z0-9._-]/g, "-")).join("/");
+
+const trackingAuditApplicationFingerprint = (payload) =>
+  [
+    normalizeEmail(payload?.email),
+    normalizeString(payload?.websiteUrl),
+    normalizeString(payload?.firstName),
+    normalizeString(payload?.lastName),
+    normalizeString(payload?.company),
+    normalizeString(payload?.industry),
+    normalizeString(payload?.role),
+    normalizeString(payload?.decisionInfluence),
+    normalizeString(payload?.monthlyAdSpendBand || payload?.monthlyAdSpend),
+    normalizeList(payload?.adPlatforms),
+    normalizeString(payload?.trackingMaturity),
+    normalizeString(payload?.primaryConversionType),
+    normalizeString(payload?.measurementProblem),
+    normalizeString(payload?.urgency),
+    payload?.optIn === true ? "opted_in" : "not_opted_in",
+  ].join("|");
 
 const getBlobStore = async () => {
   if (process.env.VITEST) return testDurableStore || null;
@@ -133,14 +161,19 @@ export const markIdempotencyKey = async (key, payload = {}) => {
   }
 };
 
-export const claimAuditStep = async (key, { mongoUri, databaseName = "alphatrack", leaseMs = 60_000 } = {}) => {
+export const claimAuditStep = async (
+  key,
+  { mongoUri, databaseName = "alphatrack", leaseMs = 60_000, allowExpiredReclaim = true } = {},
+) => {
   if (!key) return false;
   const nowMs = Date.now();
 
   if (process.env.VITEST) {
     const existing = testAuditStepClaims.get(key);
     if (existing?.status === "completed") return false;
-    if (existing?.status === "in_progress" && (existing.leaseUntil || 0) > nowMs) return false;
+    if (existing?.status === "in_progress") {
+      if (!allowExpiredReclaim || (existing.leaseUntil || 0) > nowMs) return false;
+    }
     testAuditStepClaims.set(key, { status: "in_progress", leaseUntil: nowMs + leaseMs });
     return true;
   }
@@ -156,6 +189,8 @@ export const claimAuditStep = async (key, { mongoUri, databaseName = "alphatrack
   } catch (error) {
     if (!isDuplicateKeyError(error)) throw error;
   }
+
+  if (!allowExpiredReclaim) return false;
 
   const reclaimed = await AuditStepClaim.findOneAndUpdate(
     { key, status: "in_progress", leaseUntil: { $lte: now } },
@@ -221,8 +256,12 @@ export const buildLeadDedupeKey = (payload) => {
   }
 
   if (source === "tracking_audit_offer") {
-    const website = normalizeString(payload?.websiteUrl);
-    return safeKey(["lead", source, dayStamp(), hashValue(`${email}|${website}`)]);
+    return safeKey([
+      "lead",
+      source,
+      dayStamp(),
+      hashValue(trackingAuditApplicationFingerprint(payload)),
+    ]);
   }
 
   return safeKey(["lead", source, dayStamp(), hashValue(email)]);
