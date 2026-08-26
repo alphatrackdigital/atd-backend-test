@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import mongoose from "mongoose";
+import { normalizeAuditChannels } from "./tracking-audit-contract.mjs";
 
 const memoryStore = globalThis.__atdConversionIdempotency ?? new Map();
 globalThis.__atdConversionIdempotency = memoryStore;
@@ -31,14 +32,8 @@ export const normalizeEmail = (value) => String(value || "").trim().toLowerCase(
 
 const normalizeString = (value) => String(value || "").trim().toLowerCase();
 
-const normalizeList = (value) => {
-  const values = Array.isArray(value)
-    ? value
-    : typeof value === "string"
-      ? value.split(/[,;]+/)
-      : [];
-  return [...new Set(values.map(normalizeString).filter(Boolean))].sort().join(",");
-};
+const normalizeAuditChannelsForFingerprint = (value) =>
+  normalizeAuditChannels(value).slice().sort().join(",");
 
 export const hashValue = (value) =>
   createHash("sha256").update(String(value)).digest("hex").slice(0, 32);
@@ -58,7 +53,7 @@ const trackingAuditApplicationFingerprint = (payload) =>
     normalizeString(payload?.role),
     normalizeString(payload?.decisionInfluence),
     normalizeString(payload?.monthlyAdSpendBand || payload?.monthlyAdSpend),
-    normalizeList(payload?.adPlatforms),
+    normalizeAuditChannelsForFingerprint(payload?.adPlatforms),
     normalizeString(payload?.trackingMaturity),
     normalizeString(payload?.primaryConversionType),
     normalizeString(payload?.measurementProblem),
