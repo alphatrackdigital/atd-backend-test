@@ -493,6 +493,22 @@ const logNonFatal = (label: string, error: unknown) => {
   console.error(label, { message: error instanceof Error ? error.message : String(error) });
 };
 
+const getAuditProviderFailureStatus = (error: unknown): number | null => {
+  const message = error instanceof Error ? error.message : String(error);
+  const match = message.match(/\bstatus\s+(\d{3})\b/i);
+  return match ? Number(match[1]) : null;
+};
+
+const isDefiniteAuditStepFailure = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("Brevo contact ID is unavailable")) return true;
+  const status = getAuditProviderFailureStatus(error);
+  return status !== null && status >= 400 && status < 500 && status !== 408;
+};
+
+const isReplaySafeAuditStepName = (step: string): boolean =>
+  step === "audit-mongo-persistence" || step === "audit-meta-capi";
+
 const runIdempotentAuditStep = async (
   dedupeKey: string,
   step: string,
@@ -507,8 +523,13 @@ const runIdempotentAuditStep = async (
     await action();
     await completeAuditStep(stepKey);
   } catch (error) {
-    if (claimed) {
+    const shouldReleaseClaim = isReplaySafeAuditStepName(step) || isDefiniteAuditStepFailure(error);
+    if (claimed && shouldReleaseClaim) {
       await releaseAuditStep(stepKey).catch((releaseError) => logNonFatal(`${errorLabel} (claim release failed)`, releaseError));
+    } else if (claimed) {
+      console.warn(`${errorLabel} (ambiguous provider outcome; preserving claim to prevent replay)`, {
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
     logNonFatal(errorLabel, error);
   }
