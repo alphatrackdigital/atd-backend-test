@@ -3,8 +3,8 @@ import mongoose from "mongoose";
 
 const memoryStore = globalThis.__atdConversionIdempotency ?? new Map();
 globalThis.__atdConversionIdempotency = memoryStore;
-const testAuditStepClaims = globalThis.__atdAuditStepClaims ?? new Map();
-globalThis.__atdAuditStepClaims = testAuditStepClaims;
+const auditStepMemoryClaims = globalThis.__atdAuditStepClaims ?? new Map();
+globalThis.__atdAuditStepClaims = auditStepMemoryClaims;
 
 const STORE_NAME = "atd-conversion-idempotency";
 let testDurableStore;
@@ -65,6 +65,9 @@ const trackingAuditApplicationFingerprint = (payload) =>
     normalizeString(payload?.urgency),
     payload?.optIn === true ? "opted_in" : "not_opted_in",
   ].join("|");
+
+const isReplaySafeAuditStep = (key) =>
+  key.endsWith("/audit-mongo-persistence") || key.endsWith("/audit-meta-capi");
 
 const getBlobStore = async () => {
   if (process.env.VITEST) return testDurableStore || null;
@@ -163,18 +166,20 @@ export const markIdempotencyKey = async (key, payload = {}) => {
 
 export const claimAuditStep = async (
   key,
-  { mongoUri, databaseName = "alphatrack", leaseMs = 60_000, allowExpiredReclaim = true } = {},
+  { mongoUri, databaseName = "alphatrack", leaseMs = 60_000, allowExpiredReclaim } = {},
 ) => {
   if (!key) return false;
+  const reclaimExpired = allowExpiredReclaim ?? isReplaySafeAuditStep(key);
   const nowMs = Date.now();
 
+  const memoryClaim = auditStepMemoryClaims.get(key);
+  if (memoryClaim?.status === "completed") return false;
+  if (memoryClaim?.status === "in_progress") {
+    if (!reclaimExpired || (memoryClaim.leaseUntil || 0) > nowMs) return false;
+  }
+
   if (process.env.VITEST) {
-    const existing = testAuditStepClaims.get(key);
-    if (existing?.status === "completed") return false;
-    if (existing?.status === "in_progress") {
-      if (!allowExpiredReclaim || (existing.leaseUntil || 0) > nowMs) return false;
-    }
-    testAuditStepClaims.set(key, { status: "in_progress", leaseUntil: nowMs + leaseMs });
+    auditStepMemoryClaims.set(key, { status: "in_progress", leaseUntil: nowMs + leaseMs });
     return true;
   }
 
@@ -185,59 +190,72 @@ export const claimAuditStep = async (
 
   try {
     await AuditStepClaim.create({ key, status: "in_progress", leaseUntil, createdAt: now, updatedAt: now, expiresAt });
+    auditStepMemoryClaims.set(key, { status: "in_progress", leaseUntil: leaseUntil.getTime() });
     return true;
   } catch (error) {
     if (!isDuplicateKeyError(error)) throw error;
   }
 
-  if (!allowExpiredReclaim) return false;
+  if (!reclaimExpired) return false;
 
   const reclaimed = await AuditStepClaim.findOneAndUpdate(
     { key, status: "in_progress", leaseUntil: { $lte: now } },
     { $set: { leaseUntil, updatedAt: now, expiresAt } },
     { new: true },
   ).lean();
+  if (reclaimed) {
+    auditStepMemoryClaims.set(key, { status: "in_progress", leaseUntil: leaseUntil.getTime() });
+  }
   return Boolean(reclaimed);
 };
 
 export const completeAuditStep = async (key, { mongoUri, databaseName = "alphatrack" } = {}) => {
   if (!key) return;
   if (process.env.VITEST) {
-    testAuditStepClaims.set(key, { status: "completed" });
+    auditStepMemoryClaims.set(key, { status: "completed" });
     return;
   }
 
-  await connectAuditStepStore(mongoUri, databaseName);
-  const now = new Date();
-  await AuditStepClaim.updateOne(
-    { key, status: "in_progress" },
-    {
-      $set: {
-        status: "completed",
-        leaseUntil: null,
-        updatedAt: now,
-        expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+  try {
+    await connectAuditStepStore(mongoUri, databaseName);
+    const now = new Date();
+    await AuditStepClaim.updateOne(
+      { key, status: "in_progress" },
+      {
+        $set: {
+          status: "completed",
+          leaseUntil: null,
+          updatedAt: now,
+          expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+        },
       },
-    },
-  );
+    );
+    auditStepMemoryClaims.set(key, { status: "completed" });
+  } catch (error) {
+    console.error("Tracking Audit completion marker persistence failed; preserving the durable in-progress claim.", {
+      key,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 };
 
 export const releaseAuditStep = async (key, { mongoUri, databaseName = "alphatrack" } = {}) => {
   if (!key) return;
   if (process.env.VITEST) {
-    const existing = testAuditStepClaims.get(key);
-    if (existing?.status === "in_progress") testAuditStepClaims.delete(key);
+    const existing = auditStepMemoryClaims.get(key);
+    if (existing?.status === "in_progress") auditStepMemoryClaims.delete(key);
     return;
   }
 
   await connectAuditStepStore(mongoUri, databaseName);
   await AuditStepClaim.deleteOne({ key, status: "in_progress" });
+  auditStepMemoryClaims.delete(key);
 };
 
 export const resetIdempotencyForTests = () => {
   if (process.env.VITEST) {
     memoryStore.clear();
-    testAuditStepClaims.clear();
+    auditStepMemoryClaims.clear();
     testDurableStore = undefined;
   }
 };
