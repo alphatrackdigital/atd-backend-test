@@ -52,10 +52,38 @@ export const hashValue = (value: unknown): string =>
 
 const normalizeString = (value: unknown): string => String(value || "").trim().toLowerCase();
 
+const normalizeList = (value: unknown): string => {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[,;]+/)
+      : [];
+  return [...new Set(values.map(normalizeString).filter(Boolean))].sort().join(",");
+};
+
 const dayStamp = (date = new Date()): string => date.toISOString().slice(0, 10);
 
 const safeKey = (parts: string[]): string =>
   parts.map((p) => String(p).replace(/[^a-zA-Z0-9._-]/g, "-")).join("/");
+
+const trackingAuditApplicationFingerprint = (payload: Record<string, unknown>): string =>
+  [
+    normalizeEmail(payload.email),
+    normalizeString(payload.websiteUrl),
+    normalizeString(payload.firstName),
+    normalizeString(payload.lastName),
+    normalizeString(payload.company),
+    normalizeString(payload.industry),
+    normalizeString(payload.role),
+    normalizeString(payload.decisionInfluence),
+    normalizeString(payload.monthlyAdSpendBand || payload.monthlyAdSpend),
+    normalizeList(payload.adPlatforms),
+    normalizeString(payload.trackingMaturity),
+    normalizeString(payload.primaryConversionType),
+    normalizeString(payload.measurementProblem),
+    normalizeString(payload.urgency),
+    payload.optIn === true ? "opted_in" : "not_opted_in",
+  ].join("|");
 
 const isDuplicateKeyError = (error: unknown) =>
   typeof error === "object" && error !== null && "code" in error && Number((error as { code?: unknown }).code) === 11000;
@@ -89,14 +117,21 @@ export const markIdempotencyKey = async (key: string, payload: Record<string, un
   }
 };
 
-export const claimAuditStep = async (key: string, leaseMs = 60_000): Promise<boolean> => {
+export const claimAuditStep = async (
+  key: string,
+  options: { leaseMs?: number; allowExpiredReclaim?: boolean } = {},
+): Promise<boolean> => {
   if (!key) return false;
+  const leaseMs = options.leaseMs ?? 60_000;
+  const allowExpiredReclaim = options.allowExpiredReclaim ?? true;
   const nowMs = Date.now();
 
   if (process.env.VITEST) {
     const existing = testAuditStepClaims.get(key);
     if (existing?.status === "completed") return false;
-    if (existing?.status === "in_progress" && (existing.leaseUntil || 0) > nowMs) return false;
+    if (existing?.status === "in_progress") {
+      if (!allowExpiredReclaim || (existing.leaseUntil || 0) > nowMs) return false;
+    }
     testAuditStepClaims.set(key, { status: "in_progress", leaseUntil: nowMs + leaseMs });
     return true;
   }
@@ -123,6 +158,8 @@ export const claimAuditStep = async (key: string, leaseMs = 60_000): Promise<boo
   } catch (error) {
     if (!isDuplicateKeyError(error)) throw error;
   }
+
+  if (!allowExpiredReclaim) return false;
 
   const reclaimed = await AuditStepClaim.findOneAndUpdate(
     { key, status: "in_progress", leaseUntil: { $lte: now } },
@@ -183,8 +220,12 @@ export const buildLeadDedupeKey = (payload: Record<string, unknown>): string => 
   }
 
   if (source === "tracking_audit_offer") {
-    const website = normalizeString(payload?.websiteUrl);
-    return safeKey(["lead", source, dayStamp(), hashValue(`${email}|${website}`)]);
+    return safeKey([
+      "lead",
+      source,
+      dayStamp(),
+      hashValue(trackingAuditApplicationFingerprint(payload)),
+    ]);
   }
 
   return safeKey(["lead", source, dayStamp(), hashValue(email)]);
