@@ -404,7 +404,7 @@ const getMetaEventSourceUrl = (data: TrackingAuditPayload) => {
   }
 };
 
-const sendMetaConversionEvent = async (data: TrackingAuditPayload, req: Req) => {
+const sendMetaConversionEvent = async (data: TrackingAuditPayload, req: Req, eventId: string) => {
   const pixelId = process.env.META_PIXEL_ID?.trim();
   const accessToken = process.env.META_CAPI_ACCESS_TOKEN?.trim();
   if (!pixelId || !accessToken) {
@@ -414,7 +414,6 @@ const sendMetaConversionEvent = async (data: TrackingAuditPayload, req: Req) => 
 
   const graphVersion = process.env.META_GRAPH_API_VERSION?.trim() || "v23.0";
   const testEventCode = process.env.META_CAPI_TEST_EVENT_CODE?.trim();
-  const eventId = data.metaEventId || buildLeadDedupeKey(data as unknown as Record<string, unknown>);
   const userAgent = getHeader(req.headers, "user-agent") || "";
   const clientIp = getClientIp(req);
   const body = {
@@ -541,6 +540,7 @@ const completeAuditSideEffects = async (
   audit: NormalizedTrackingAuditApplication,
   contactId: number | string | undefined,
   brevoApiKey: string,
+  metaEventId: string,
   req: Req,
 ) => {
   await runIdempotentAuditStep(
@@ -579,7 +579,7 @@ const completeAuditSideEffects = async (
   await runIdempotentAuditStep(
     dedupeKey,
     "audit-meta-capi",
-    () => sendMetaConversionEvent(data, req),
+    () => sendMetaConversionEvent(data, req, metaEventId),
     "Meta CAPI Tracking Audit lead event failed after successful capture",
   );
 };
@@ -628,8 +628,12 @@ const trackingAuditHandler = async (req: Req, res: Res) => {
     const contactId = typeof storedContactId === "string" || typeof storedContactId === "number"
       ? storedContactId
       : undefined;
-    await completeAuditSideEffects(dedupeKey, payload, audit, contactId, brevoApiKey, req);
-    return res.status(200).json({ ok: true, pendingConfirmation: false, duplicate: true, metaEventId: payload.metaEventId });
+    const storedMetaEventId = existingSubmission?.metaEventId;
+    const metaEventId = typeof storedMetaEventId === "string" && storedMetaEventId.trim()
+      ? storedMetaEventId.trim()
+      : dedupeKey;
+    await completeAuditSideEffects(dedupeKey, payload, audit, contactId, brevoApiKey, metaEventId, req);
+    return res.status(200).json({ ok: true, pendingConfirmation: false, duplicate: true, metaEventId });
   }
 
   try {
@@ -640,17 +644,19 @@ const trackingAuditHandler = async (req: Req, res: Res) => {
       return res.status(502).json({ ok: false, message: "Unable to submit lead right now." });
     }
 
+    const metaEventId = payload.metaEventId?.trim() || dedupeKey;
     await markIdempotencyKey(dedupeKey, {
       source: payload.source,
       emailHash: dedupeKey.split("/").at(-1),
       listId: auditListId,
       auditMode: audit.mode,
+      metaEventId,
       ...(upsert.contactId ? { contactId: upsert.contactId } : {}),
     });
 
-    await completeAuditSideEffects(dedupeKey, payload, audit, upsert.contactId, brevoApiKey, req);
+    await completeAuditSideEffects(dedupeKey, payload, audit, upsert.contactId, brevoApiKey, metaEventId, req);
 
-    return res.status(200).json({ ok: true, pendingConfirmation: false, duplicate: false, metaEventId: payload.metaEventId });
+    return res.status(200).json({ ok: true, pendingConfirmation: false, duplicate: false, metaEventId });
   } catch (error) {
     console.error("Tracking Audit submission failed", {
       message: error instanceof Error ? error.message : String(error),
