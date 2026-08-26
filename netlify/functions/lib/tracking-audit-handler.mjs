@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-import { buildLeadDedupeKey, getIdempotencyRecord, markIdempotencyKey } from "./idempotency.mjs";
+import {
+  buildLeadDedupeKey,
+  claimAuditStep,
+  completeAuditStep,
+  getIdempotencyRecord,
+  markIdempotencyKey,
+  releaseAuditStep,
+} from "./idempotency.mjs";
 import { saveLeadContact } from "./contact-persistence.mjs";
 import { hasDisallowedBrowserOrigin, isAllowedBrowserOrigin } from "./origin-policy.mjs";
 import { auditLifecycleAttributes, normalizeTrackingAuditApplication } from "./tracking-audit-contract.mjs";
@@ -120,7 +127,7 @@ const buildBrevoAttributes = (data, audit, existingContact) => {
     ...(audit.company ? { COMPANY: audit.company } : {}),
     WEBSITE: audit.websiteUrl,
     AD_PLATFORMS: audit.adPlatforms.join(", "),
-    ...(audit.mode === "legacy" ? { AD_SPEND: audit.legacyMonthlyAdSpend } : {}),
+    AD_SPEND: audit.mode === "legacy" ? audit.legacyMonthlyAdSpend : "",
     ...auditLifecycleAttributes(audit, timestamp),
     LEAD_SOURCE: "tracking_audit_offer",
     ...getSourceLifecycleAttributes(data, existingContact, timestamp),
@@ -332,22 +339,60 @@ const logNonFatal = (label, error) => {
   console.error(label, { message: error instanceof Error ? error.message : String(error) });
 };
 
+const getAuditStepStoreOptions = () => ({
+  mongoUri: getEnv("MONGODB_URI"),
+  databaseName: getEnv("MONGODB_DATABASE") || "alphatrack",
+});
+
 const runIdempotentAuditStep = async (dedupeKey, step, action, errorLabel) => {
   const stepKey = `${dedupeKey}/${step}`;
-  if (await getIdempotencyRecord(stepKey)) return;
+  const storeOptions = getAuditStepStoreOptions();
+  let claimed = false;
 
   try {
+    claimed = await claimAuditStep(stepKey, storeOptions);
+    if (!claimed) return;
     await action();
-    await markIdempotencyKey(stepKey, { completed: true });
+    await completeAuditStep(stepKey, storeOptions);
   } catch (error) {
+    if (claimed) {
+      await releaseAuditStep(stepKey, storeOptions).catch((releaseError) => logNonFatal(`${errorLabel} (claim release failed)`, releaseError));
+    }
     logNonFatal(errorLabel, error);
   }
 };
 
+const persistTrackingAudit = async (dedupeKey, data, audit, request) => {
+  const saved = await saveLeadContact({
+    ...data,
+    submissionKey: dedupeKey,
+    company: audit.company,
+    websiteUrl: audit.websiteUrl,
+    monthlyAdSpend: audit.mode === "legacy" ? audit.legacyMonthlyAdSpend : "",
+    legacyMonthlyAdSpend: audit.legacyMonthlyAdSpend,
+    monthlyAdSpendBand: audit.monthlyAdSpendBand,
+    adPlatforms: audit.adPlatforms,
+    industry: audit.industry,
+    role: audit.role,
+    decisionInfluence: audit.decisionInfluence,
+    trackingMaturity: audit.trackingMaturity,
+    primaryConversionType: audit.primaryConversionType,
+    measurementProblem: audit.measurementProblem,
+    urgency: audit.urgency,
+  }, getClientIp(request), getEnv("MONGODB_URI"), getEnv("MONGODB_DATABASE") || "alphatrack");
+  if (!saved) throw new Error("MongoDB Tracking Audit persistence is not configured.");
+};
+
 const completeAuditSideEffects = async (dedupeKey, data, audit, contactId, apiKey, request) => {
+  await runIdempotentAuditStep(
+    dedupeKey,
+    "audit-mongo-persistence",
+    () => persistTrackingAudit(dedupeKey, data, audit, request),
+    "MongoDB Tracking Audit persistence failed after successful Brevo capture",
+  );
+
   let resolvedContactId = contactId;
-  const taskKey = `${dedupeKey}/audit-review-task`;
-  if (!(await getIdempotencyRecord(taskKey)) && !resolvedContactId) {
+  if (!resolvedContactId) {
     resolvedContactId = (await getBrevoContactByEmail(data.email, apiKey))?.id;
   }
 
@@ -440,25 +485,6 @@ export default async (request) => {
       listId: auditListId,
       auditMode: audit.mode,
       ...(upsert.contactId ? { contactId: upsert.contactId } : {}),
-    });
-
-    await saveLeadContact({
-      ...payload,
-      company: audit.company,
-      websiteUrl: audit.websiteUrl,
-      monthlyAdSpend: audit.mode === "legacy" ? audit.legacyMonthlyAdSpend : "",
-      legacyMonthlyAdSpend: audit.legacyMonthlyAdSpend,
-      monthlyAdSpendBand: audit.monthlyAdSpendBand,
-      adPlatforms: audit.adPlatforms,
-      industry: audit.industry,
-      role: audit.role,
-      decisionInfluence: audit.decisionInfluence,
-      trackingMaturity: audit.trackingMaturity,
-      primaryConversionType: audit.primaryConversionType,
-      measurementProblem: audit.measurementProblem,
-      urgency: audit.urgency,
-    }, getClientIp(request), getEnv("MONGODB_URI"), getEnv("MONGODB_DATABASE") || "alphatrack").catch((error) => {
-      logNonFatal("MongoDB Tracking Audit persistence failed after successful Brevo capture", error);
     });
 
     await completeAuditSideEffects(dedupeKey, payload, audit, upsert.contactId, apiKey, request);
