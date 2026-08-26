@@ -66,7 +66,9 @@ const buildNetlifyRequest = (body: Record<string, unknown>, ip: string) =>
     body: JSON.stringify(body),
   });
 
-const installMetaRetryFetch = () => {
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const installMetaRetryFetch = ({ delayContactMs = 0 }: { delayContactMs?: number } = {}) => {
   const metaBodies: Array<Record<string, unknown>> = [];
   let metaAttempts = 0;
 
@@ -78,6 +80,7 @@ const installMetaRetryFetch = () => {
       return new Response("", { status: 404 });
     }
     if (target === "https://api.brevo.com/v3/contacts" && method === "POST") {
+      if (delayContactMs) await sleep(delayContactMs);
       return new Response(JSON.stringify({ id: 456 }), { status: 201 });
     }
     if (target === "https://api.brevo.com/v3/crm/tasks") {
@@ -97,7 +100,7 @@ const installMetaRetryFetch = () => {
   });
 
   vi.stubGlobal("fetch", fetchMock);
-  return { metaBodies, getMetaAttempts: () => metaAttempts };
+  return { fetchMock, metaBodies, getMetaAttempts: () => metaAttempts };
 };
 
 const metaEventIds = (bodies: Array<Record<string, unknown>>) =>
@@ -176,6 +179,30 @@ describe("Tracking Audit final review regressions", () => {
     });
   }
 
+  it("Vercel rejects non-string identity fields with 400 before provider calls", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const malformed = { ...canonicalAudit("vercel-malformed@example.com"), email: 42 };
+    const result = buildVercelResponse();
+
+    await vercelHandler(buildVercelRequest(malformed, "127.22.0.1"), result.response);
+
+    expect(result.result()).toMatchObject({ statusCode: 400, payload: { ok: false } });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("Netlify rejects non-string identity fields with 400 before provider calls", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const malformed = { ...canonicalAudit("netlify-malformed@example.com"), firstName: 42 };
+
+    const response = await netlifyHandler(buildNetlifyRequest(malformed, "127.22.0.2"));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ ok: false });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("Vercel reuses the original Meta event ID when a replay-safe CAPI retry carries a different ID", async () => {
     const provider = installMetaRetryFetch();
     const original = canonicalAudit("vercel-meta-stable@example.com", "vercel-browser-event-original");
@@ -231,5 +258,52 @@ describe("Tracking Audit final review regressions", () => {
       "netlify-browser-event-original",
       "netlify-browser-event-original",
     ]);
+  });
+
+  it("Vercel atomically reserves one Meta event ID across overlapping first submissions", async () => {
+    const provider = installMetaRetryFetch({ delayContactMs: 10 });
+    const base = canonicalAudit("vercel-meta-concurrent@example.com", "vercel-concurrent-event-a");
+    const first = buildVercelResponse();
+    const second = buildVercelResponse();
+
+    await Promise.all([
+      vercelHandler(buildVercelRequest(base, "127.23.0.1"), first.response),
+      vercelHandler(
+        buildVercelRequest({ ...base, metaEventId: "vercel-concurrent-event-b" }, "127.23.0.2"),
+        second.response,
+      ),
+    ]);
+
+    expect(first.result().payload).toMatchObject({ metaEventId: "vercel-concurrent-event-a" });
+    expect(second.result().payload).toMatchObject({ metaEventId: "vercel-concurrent-event-a" });
+
+    const retry = buildVercelResponse();
+    await vercelHandler(
+      buildVercelRequest({ ...base, metaEventId: "vercel-concurrent-event-c" }, "127.23.0.3"),
+      retry.response,
+    );
+    expect(retry.result().payload).toMatchObject({ metaEventId: "vercel-concurrent-event-a" });
+    expect(new Set(metaEventIds(provider.metaBodies))).toEqual(new Set(["vercel-concurrent-event-a"]));
+  });
+
+  it("Netlify atomically reserves one Meta event ID across overlapping first submissions", async () => {
+    const provider = installMetaRetryFetch({ delayContactMs: 10 });
+    const base = canonicalAudit("netlify-meta-concurrent@example.com", "netlify-concurrent-event-a");
+
+    const [first, second] = await Promise.all([
+      netlifyHandler(buildNetlifyRequest(base, "127.24.0.1")),
+      netlifyHandler(
+        buildNetlifyRequest({ ...base, metaEventId: "netlify-concurrent-event-b" }, "127.24.0.2"),
+      ),
+    ]);
+
+    await expect(first.json()).resolves.toMatchObject({ metaEventId: "netlify-concurrent-event-a" });
+    await expect(second.json()).resolves.toMatchObject({ metaEventId: "netlify-concurrent-event-a" });
+
+    const retry = await netlifyHandler(
+      buildNetlifyRequest({ ...base, metaEventId: "netlify-concurrent-event-c" }, "127.24.0.3"),
+    );
+    await expect(retry.json()).resolves.toMatchObject({ metaEventId: "netlify-concurrent-event-a" });
+    expect(new Set(metaEventIds(provider.metaBodies))).toEqual(new Set(["netlify-concurrent-event-a"]));
   });
 });
