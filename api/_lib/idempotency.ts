@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import mongoose, { Schema } from "mongoose";
 import { connectDB } from "./db";
+import { normalizeAuditChannels } from "./trackingAuditContract";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const memoryStore: Map<string, Record<string, unknown>> = (globalThis as any).__atdConversionIdempotency ?? new Map();
@@ -52,14 +53,8 @@ export const hashValue = (value: unknown): string =>
 
 const normalizeString = (value: unknown): string => String(value || "").trim().toLowerCase();
 
-const normalizeList = (value: unknown): string => {
-  const values = Array.isArray(value)
-    ? value
-    : typeof value === "string"
-      ? value.split(/[,;]+/)
-      : [];
-  return [...new Set(values.map(normalizeString).filter(Boolean))].sort().join(",");
-};
+const normalizeAuditChannelsForFingerprint = (value: unknown): string =>
+  normalizeAuditChannels(value).slice().sort().join(",");
 
 const dayStamp = (date = new Date()): string => date.toISOString().slice(0, 10);
 
@@ -77,7 +72,7 @@ const trackingAuditApplicationFingerprint = (payload: Record<string, unknown>): 
     normalizeString(payload.role),
     normalizeString(payload.decisionInfluence),
     normalizeString(payload.monthlyAdSpendBand || payload.monthlyAdSpend),
-    normalizeList(payload.adPlatforms),
+    normalizeAuditChannelsForFingerprint(payload.adPlatforms),
     normalizeString(payload.trackingMaturity),
     normalizeString(payload.primaryConversionType),
     normalizeString(payload.measurementProblem),
