@@ -17,10 +17,10 @@ interface AuditStepClaimRecord {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const testAuditStepClaims: Map<string, { status: "in_progress" | "completed"; leaseUntil?: number }> =
+const auditStepMemoryClaims: Map<string, { status: "in_progress" | "completed"; leaseUntil?: number }> =
   (globalThis as any).__atdAuditStepClaims ?? new Map();
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-(globalThis as any).__atdAuditStepClaims = testAuditStepClaims;
+(globalThis as any).__atdAuditStepClaims = auditStepMemoryClaims;
 
 const IdempotencySchema = new Schema({
   key:       { type: String, required: true, unique: true },
@@ -85,6 +85,9 @@ const trackingAuditApplicationFingerprint = (payload: Record<string, unknown>): 
     payload.optIn === true ? "opted_in" : "not_opted_in",
   ].join("|");
 
+const isReplaySafeAuditStep = (key: string): boolean =>
+  key.endsWith("/audit-mongo-persistence") || key.endsWith("/audit-meta-capi");
+
 const isDuplicateKeyError = (error: unknown) =>
   typeof error === "object" && error !== null && "code" in error && Number((error as { code?: unknown }).code) === 11000;
 
@@ -123,16 +126,17 @@ export const claimAuditStep = async (
 ): Promise<boolean> => {
   if (!key) return false;
   const leaseMs = options.leaseMs ?? 60_000;
-  const allowExpiredReclaim = options.allowExpiredReclaim ?? true;
+  const allowExpiredReclaim = options.allowExpiredReclaim ?? isReplaySafeAuditStep(key);
   const nowMs = Date.now();
 
+  const memoryClaim = auditStepMemoryClaims.get(key);
+  if (memoryClaim?.status === "completed") return false;
+  if (memoryClaim?.status === "in_progress") {
+    if (!allowExpiredReclaim || (memoryClaim.leaseUntil || 0) > nowMs) return false;
+  }
+
   if (process.env.VITEST) {
-    const existing = testAuditStepClaims.get(key);
-    if (existing?.status === "completed") return false;
-    if (existing?.status === "in_progress") {
-      if (!allowExpiredReclaim || (existing.leaseUntil || 0) > nowMs) return false;
-    }
-    testAuditStepClaims.set(key, { status: "in_progress", leaseUntil: nowMs + leaseMs });
+    auditStepMemoryClaims.set(key, { status: "in_progress", leaseUntil: nowMs + leaseMs });
     return true;
   }
 
@@ -154,6 +158,7 @@ export const claimAuditStep = async (
       updatedAt: now,
       expiresAt,
     });
+    auditStepMemoryClaims.set(key, { status: "in_progress", leaseUntil: leaseUntil.getTime() });
     return true;
   } catch (error) {
     if (!isDuplicateKeyError(error)) throw error;
@@ -166,47 +171,59 @@ export const claimAuditStep = async (
     { $set: { leaseUntil, updatedAt: now, expiresAt } },
     { new: true },
   ).lean();
+  if (reclaimed) {
+    auditStepMemoryClaims.set(key, { status: "in_progress", leaseUntil: leaseUntil.getTime() });
+  }
   return Boolean(reclaimed);
 };
 
 export const completeAuditStep = async (key: string): Promise<void> => {
   if (!key) return;
   if (process.env.VITEST) {
-    testAuditStepClaims.set(key, { status: "completed" });
+    auditStepMemoryClaims.set(key, { status: "completed" });
     return;
   }
 
-  await connectDB();
-  const now = new Date();
-  await AuditStepClaim.updateOne(
-    { key, status: "in_progress" },
-    {
-      $set: {
-        status: "completed",
-        leaseUntil: null,
-        updatedAt: now,
-        expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+  try {
+    await connectDB();
+    const now = new Date();
+    await AuditStepClaim.updateOne(
+      { key, status: "in_progress" },
+      {
+        $set: {
+          status: "completed",
+          leaseUntil: null,
+          updatedAt: now,
+          expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+        },
       },
-    },
-  );
+    );
+    auditStepMemoryClaims.set(key, { status: "completed" });
+  } catch (error) {
+    console.error("Tracking Audit completion marker persistence failed; preserving the durable in-progress claim.", {
+      key,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 };
 
 export const releaseAuditStep = async (key: string): Promise<void> => {
   if (!key) return;
   if (process.env.VITEST) {
-    const existing = testAuditStepClaims.get(key);
-    if (existing?.status === "in_progress") testAuditStepClaims.delete(key);
+    const existing = auditStepMemoryClaims.get(key);
+    if (existing?.status === "in_progress") auditStepMemoryClaims.delete(key);
     return;
   }
 
   await connectDB();
   await AuditStepClaim.deleteOne({ key, status: "in_progress" });
+  auditStepMemoryClaims.delete(key);
 };
 
 export const resetIdempotencyForTests = (): void => {
   if (process.env.VITEST) {
     memoryStore.clear();
-    testAuditStepClaims.clear();
+    auditStepMemoryClaims.clear();
   }
 };
 
