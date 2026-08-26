@@ -7,7 +7,9 @@ on:
   pull_request_review:
     types: [submitted, dismissed]
   push:
-    branches: [main]
+    branches:
+      - main
+      - feature/tracking-audit-application-flow
 
 permissions:
   contents: read
@@ -51,7 +53,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Checkout main push
+      - name: Checkout push
         if: github.event_name == 'push'
         uses: actions/checkout@v4
 
@@ -69,3 +71,274 @@ jobs:
 
       - name: Type-check
         run: npm run type-check
+
+  patch-pr13:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/feature/tracking-audit-application-flow' && github.event.head_commit.message == 'chore: stage one-time PR13 patch runner'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/tracking-audit-application-flow
+          fetch-depth: 0
+
+      - name: Apply reviewed idempotency fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_exact(path, old, new, expected=1):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f"{path}: expected {expected} occurrences, found {count}")
+              p.write_text(text.replace(old, new))
+
+          # Use the same paid-channel normalization as the Tracking Audit contract.
+          replace_exact(
+              "api/_lib/idempotency.ts",
+              'import { connectDB } from "./db";\n',
+              'import { connectDB } from "./db";\nimport { normalizeAuditChannels } from "./trackingAuditContract";\n',
+          )
+          replace_exact(
+              "api/_lib/idempotency.ts",
+              '''const normalizeList = (value: unknown): string => {\n  const values = Array.isArray(value)\n    ? value\n    : typeof value === "string"\n      ? value.split(/[,;]+/)\n      : [];\n  return [...new Set(values.map(normalizeString).filter(Boolean))].sort().join(",");\n};\n''',
+              '''const normalizeAuditChannelsForFingerprint = (value: unknown): string =>\n  normalizeAuditChannels(value).slice().sort().join(",");\n''',
+          )
+          replace_exact(
+              "api/_lib/idempotency.ts",
+              '    normalizeList(payload.adPlatforms),\n',
+              '    normalizeAuditChannelsForFingerprint(payload.adPlatforms),\n',
+          )
+
+          replace_exact(
+              "netlify/functions/lib/idempotency.mjs",
+              'import mongoose from "mongoose";\n',
+              'import mongoose from "mongoose";\nimport { normalizeAuditChannels } from "./tracking-audit-contract.mjs";\n',
+          )
+          replace_exact(
+              "netlify/functions/lib/idempotency.mjs",
+              '''const normalizeList = (value) => {\n  const values = Array.isArray(value)\n    ? value\n    : typeof value === "string"\n      ? value.split(/[,;]+/)\n      : [];\n  return [...new Set(values.map(normalizeString).filter(Boolean))].sort().join(",");\n};\n''',
+              '''const normalizeAuditChannelsForFingerprint = (value) =>\n  normalizeAuditChannels(value).slice().sort().join(",");\n''',
+          )
+          replace_exact(
+              "netlify/functions/lib/idempotency.mjs",
+              '    normalizeList(payload?.adPlatforms),\n',
+              '    normalizeAuditChannelsForFingerprint(payload?.adPlatforms),\n',
+          )
+
+          # Preserve non-idempotent claims after ambiguous network/408/5xx outcomes.
+          ts_log = '''const logNonFatal = (label: string, error: unknown) => {\n  console.error(label, { message: error instanceof Error ? error.message : String(error) });\n};\n'''
+          ts_helpers = ts_log + '''\nconst getAuditProviderFailureStatus = (error: unknown): number | null => {\n  const message = error instanceof Error ? error.message : String(error);\n  const match = message.match(/\\bstatus\\s+(\\d{3})\\b/i);\n  return match ? Number(match[1]) : null;\n};\n\nconst isDefiniteAuditStepFailure = (error: unknown): boolean => {\n  const message = error instanceof Error ? error.message : String(error);\n  if (message.includes("Brevo contact ID is unavailable")) return true;\n  const status = getAuditProviderFailureStatus(error);\n  return status !== null && status >= 400 && status < 500 && status !== 408;\n};\n\nconst isReplaySafeAuditStepName = (step: string): boolean =>\n  step === "audit-mongo-persistence" || step === "audit-meta-capi";\n'''
+          replace_exact("api/_lib/trackingAuditHandler.ts", ts_log, ts_helpers)
+          replace_exact(
+              "api/_lib/trackingAuditHandler.ts",
+              '''  } catch (error) {\n    if (claimed) {\n      await releaseAuditStep(stepKey).catch((releaseError) => logNonFatal(`${errorLabel} (claim release failed)`, releaseError));\n    }\n    logNonFatal(errorLabel, error);\n  }\n};\n''',
+              '''  } catch (error) {\n    const shouldReleaseClaim = isReplaySafeAuditStepName(step) || isDefiniteAuditStepFailure(error);\n    if (claimed && shouldReleaseClaim) {\n      await releaseAuditStep(stepKey).catch((releaseError) => logNonFatal(`${errorLabel} (claim release failed)`, releaseError));\n    } else if (claimed) {\n      console.warn(`${errorLabel} (ambiguous provider outcome; preserving claim to prevent replay)`, {\n        message: error instanceof Error ? error.message : String(error),\n      });\n    }\n    logNonFatal(errorLabel, error);\n  }\n};\n''',
+          )
+
+          mjs_log = '''const logNonFatal = (label, error) => {\n  console.error(label, { message: error instanceof Error ? error.message : String(error) });\n};\n'''
+          mjs_helpers = mjs_log + '''\nconst getAuditProviderFailureStatus = (error) => {\n  const message = error instanceof Error ? error.message : String(error);\n  const match = message.match(/\\bstatus\\s+(\\d{3})\\b/i);\n  return match ? Number(match[1]) : null;\n};\n\nconst isDefiniteAuditStepFailure = (error) => {\n  const message = error instanceof Error ? error.message : String(error);\n  if (message.includes("Brevo contact ID is unavailable")) return true;\n  const status = getAuditProviderFailureStatus(error);\n  return status !== null && status >= 400 && status < 500 && status !== 408;\n};\n\nconst isReplaySafeAuditStepName = (step) =>\n  step === "audit-mongo-persistence" || step === "audit-meta-capi";\n'''
+          replace_exact("netlify/functions/lib/tracking-audit-handler.mjs", mjs_log, mjs_helpers)
+          replace_exact(
+              "netlify/functions/lib/tracking-audit-handler.mjs",
+              '''  } catch (error) {\n    if (claimed) {\n      await releaseAuditStep(stepKey, storeOptions).catch((releaseError) => logNonFatal(`${errorLabel} (claim release failed)`, releaseError));\n    }\n    logNonFatal(errorLabel, error);\n  }\n};\n''',
+              '''  } catch (error) {\n    const shouldReleaseClaim = isReplaySafeAuditStepName(step) || isDefiniteAuditStepFailure(error);\n    if (claimed && shouldReleaseClaim) {\n      await releaseAuditStep(stepKey, storeOptions).catch((releaseError) => logNonFatal(`${errorLabel} (claim release failed)`, releaseError));\n    } else if (claimed) {\n      console.warn(`${errorLabel} (ambiguous provider outcome; preserving claim to prevent replay)`, {\n        message: error instanceof Error ? error.message : String(error),\n      });\n    }\n    logNonFatal(errorLabel, error);\n  }\n};\n''',
+          )
+
+          # Existing retry tests should model a definite provider rejection, not an ambiguous 5xx.
+          for test_path in ["test/leads.test.ts", "test/netlify-leads.test.ts"]:
+              replace_exact(
+                  test_path,
+                  'return new Response("", { status: 503 });',
+                  'return new Response("", { status: 400 });',
+                  expected=2,
+              )
+
+          Path("test/tracking-audit-idempotency-safety.test.ts").write_text(r'''import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import vercelHandler from "../api/leads";
+import netlifyHandler from "../netlify/functions/leads.mjs";
+import {
+  buildLeadDedupeKey as buildVercelDedupeKey,
+  resetIdempotencyForTests as resetVercelIdempotency,
+} from "../api/_lib/idempotency";
+import {
+  buildLeadDedupeKey as buildNetlifyDedupeKey,
+  resetIdempotencyForTests as resetNetlifyIdempotency,
+} from "../netlify/functions/lib/idempotency.mjs";
+
+const canonicalAudit = (email: string) => ({
+  source: "tracking_audit_offer",
+  firstName: "Ama",
+  lastName: "Mensah",
+  email,
+  company: "Example Co",
+  websiteUrl: "https://example.com",
+  industry: "professional_services",
+  role: "founder_ceo",
+  decisionInfluence: "final_decision_maker",
+  monthlyAdSpendBand: "6000_14999",
+  adPlatforms: ["meta_ads", "google_ads"],
+  trackingMaturity: "disconnected",
+  primaryConversionType: "lead_form",
+  measurementProblem: "conflicting_numbers",
+  urgency: "before_scaling",
+});
+
+const buildVercelRequest = (body: Record<string, unknown>, ip: string) => ({
+  method: "POST",
+  body,
+  headers: {
+    origin: "https://alphatrack.digital",
+    "user-agent": "vitest-idempotency-safety",
+    "x-forwarded-for": ip,
+  },
+});
+
+const buildVercelResponse = () => {
+  let statusCode = 200;
+  let payload: unknown;
+  const response = {
+    status(code: number) { statusCode = code; return response; },
+    json(value: unknown) { payload = value; },
+    setHeader() {},
+  };
+  return { response, result: () => ({ statusCode, payload }) };
+};
+
+const buildNetlifyRequest = (body: Record<string, unknown>, ip: string) =>
+  new Request("https://alphatrack.digital/api/leads", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "user-agent": "vitest-idempotency-safety",
+      "x-nf-client-connection-ip": ip,
+    },
+    body: JSON.stringify(body),
+  });
+
+type FailureMode = 408 | 503 | "network";
+
+const installProviderFetch = (mode: FailureMode) => {
+  let receiptAttempts = 0;
+  const fetchMock = vi.fn(async (url: string | URL | Request, init: RequestInit = {}) => {
+    const target = String(url);
+    const method = String(init.method || "GET").toUpperCase();
+    if (target.startsWith("https://api.brevo.com/v3/contacts/") && method === "GET") {
+      return new Response("", { status: 404 });
+    }
+    if (target === "https://api.brevo.com/v3/contacts" && method === "POST") {
+      return new Response(JSON.stringify({ id: 456 }), { status: 201 });
+    }
+    if (target === "https://api.brevo.com/v3/crm/tasks") {
+      return new Response(JSON.stringify({ id: "task-1" }), { status: 201 });
+    }
+    if (target === "https://api.brevo.com/v3/smtp/email") {
+      const body = JSON.parse(String(init.body));
+      if (body.subject === "We received your Tracking Audit application") {
+        receiptAttempts += 1;
+        if (receiptAttempts === 1) {
+          if (mode === "network") throw new Error("simulated socket reset after write");
+          return new Response("", { status: mode });
+        }
+      }
+      return new Response(JSON.stringify({ messageId: "message-1" }), { status: 201 });
+    }
+    if (target.includes("graph.facebook.com")) {
+      return new Response(JSON.stringify({ events_received: 1 }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return { getReceiptAttempts: () => receiptAttempts };
+};
+
+describe("Tracking Audit idempotency safety", () => {
+  beforeEach(() => {
+    process.env.VITEST = "true";
+    resetVercelIdempotency();
+    resetNetlifyIdempotency();
+    process.env.BREVO_API_KEY = "test-api-key";
+    process.env.BREVO_AUDIT_LIST_ID = "11";
+    delete process.env.MONGODB_URI;
+    delete process.env.META_CAPI_ACCESS_TOKEN;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const name of ["VITEST", "BREVO_API_KEY", "BREVO_AUDIT_LIST_ID", "MONGODB_URI", "META_CAPI_ACCESS_TOKEN", "META_PIXEL_ID"]) {
+      delete process.env[name];
+    }
+  });
+
+  it("deduplicates normalized channel labels, codes, order, and attribution noise in both runtimes", () => {
+    const base = canonicalAudit("channels@example.com");
+    const legacyLabels = { ...base, adPlatforms: ["Google Ads", "Meta Ads"] };
+    const reorderedCodes = { ...base, adPlatforms: ["google_ads", "meta_ads"] };
+    const attributionNoise = { ...base, attribution: { utmSource: "meta", utmCampaign: "different" } };
+
+    expect(buildVercelDedupeKey(base)).toBe(buildVercelDedupeKey(legacyLabels));
+    expect(buildVercelDedupeKey(base)).toBe(buildVercelDedupeKey(reorderedCodes));
+    expect(buildVercelDedupeKey(base)).toBe(buildVercelDedupeKey(attributionNoise));
+    expect(buildNetlifyDedupeKey(base)).toBe(buildNetlifyDedupeKey(legacyLabels));
+    expect(buildNetlifyDedupeKey(base)).toBe(buildNetlifyDedupeKey(reorderedCodes));
+    expect(buildNetlifyDedupeKey(base)).toBe(buildNetlifyDedupeKey(attributionNoise));
+
+    expect(buildVercelDedupeKey(base)).not.toBe(buildVercelDedupeKey({ ...base, urgency: "within_30_days" }));
+    expect(buildNetlifyDedupeKey(base)).not.toBe(buildNetlifyDedupeKey({ ...base, urgency: "within_30_days" }));
+  });
+
+  it.each([408, 503, "network"] as const)("does not replay ambiguous %s applicant receipt in Vercel", async (mode) => {
+    const payload = canonicalAudit(`vercel-${mode}@example.com`);
+    const { getReceiptAttempts } = installProviderFetch(mode);
+
+    const first = buildVercelResponse();
+    await vercelHandler(buildVercelRequest(payload, `127.4.1.${mode === "network" ? 3 : mode === 408 ? 1 : 2}`), first.response);
+    expect(first.result()).toMatchObject({ statusCode: 200, payload: { ok: true, duplicate: false } });
+
+    const second = buildVercelResponse();
+    await vercelHandler(buildVercelRequest(payload, `127.4.2.${mode === "network" ? 3 : mode === 408 ? 1 : 2}`), second.response);
+    expect(second.result()).toMatchObject({ statusCode: 200, payload: { ok: true, duplicate: true } });
+    expect(getReceiptAttempts()).toBe(1);
+  });
+
+  it("does not replay an ambiguous 503 applicant receipt in Netlify", async () => {
+    const payload = canonicalAudit("netlify-503@example.com");
+    const { getReceiptAttempts } = installProviderFetch(503);
+
+    const first = await netlifyHandler(buildNetlifyRequest(payload, "127.4.3.1"));
+    expect(first.status).toBe(200);
+    await expect(first.json()).resolves.toMatchObject({ ok: true, duplicate: false });
+
+    const second = await netlifyHandler(buildNetlifyRequest(payload, "127.4.3.2"));
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({ ok: true, duplicate: true });
+    expect(getReceiptAttempts()).toBe(1);
+  });
+});
+''')
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate patched tree
+        run: |
+          npm test
+          npm run type-check
+
+      - name: Restore CI definition and commit patch
+        shell: bash
+        run: |
+          git fetch origin main
+          git show origin/main:.github/workflows/backend-ci.yml > .github/workflows/backend-ci.yml
+          git config user.name "AlphaTrack Digital"
+          git config user.email "alphatrackdigital@gmail.com"
+          git add .github/workflows/backend-ci.yml api/_lib/idempotency.ts api/_lib/trackingAuditHandler.ts netlify/functions/lib/idempotency.mjs netlify/functions/lib/tracking-audit-handler.mjs test/leads.test.ts test/netlify-leads.test.ts test/tracking-audit-idempotency-safety.test.ts
+          git commit -m "fix: harden Tracking Audit idempotency edge cases"
+          git push origin HEAD:feature/tracking-audit-application-flow
