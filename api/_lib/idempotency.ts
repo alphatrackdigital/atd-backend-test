@@ -8,12 +8,24 @@ const memoryStore: Map<string, Record<string, unknown>> = (globalThis as any).__
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).__atdConversionIdempotency = memoryStore;
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const metaEventReservationMemory: Map<string, string> = (globalThis as any).__atdTrackingAuditMetaEventReservations ?? new Map();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(globalThis as any).__atdTrackingAuditMetaEventReservations = metaEventReservationMemory;
+
 interface AuditStepClaimRecord {
   key: string;
   status: "in_progress" | "completed";
   leaseUntil?: Date | null;
   createdAt: Date;
   updatedAt: Date;
+  expiresAt: Date;
+}
+
+interface TrackingAuditMetaEventReservationRecord {
+  key: string;
+  eventId: string;
+  createdAt: Date;
   expiresAt: Date;
 }
 
@@ -38,6 +50,13 @@ const AuditStepClaimSchema = new Schema<AuditStepClaimRecord>({
   expiresAt: { type: Date, required: true, expires: 0 },
 });
 
+const TrackingAuditMetaEventReservationSchema = new Schema<TrackingAuditMetaEventReservationRecord>({
+  key: { type: String, required: true, unique: true },
+  eventId: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now },
+  expiresAt: { type: Date, required: true, expires: 0 },
+});
+
 const IdempotencyRecord =
   (mongoose.models.IdempotencyRecord as mongoose.Model<{ key: string; data?: unknown; createdAt: Date }>) ||
   mongoose.model("IdempotencyRecord", IdempotencySchema);
@@ -45,6 +64,13 @@ const IdempotencyRecord =
 const AuditStepClaim =
   (mongoose.models.AuditStepClaim as mongoose.Model<AuditStepClaimRecord>) ||
   mongoose.model<AuditStepClaimRecord>("AuditStepClaim", AuditStepClaimSchema);
+
+const TrackingAuditMetaEventReservation =
+  (mongoose.models.TrackingAuditMetaEventReservation as mongoose.Model<TrackingAuditMetaEventReservationRecord>) ||
+  mongoose.model<TrackingAuditMetaEventReservationRecord>(
+    "TrackingAuditMetaEventReservation",
+    TrackingAuditMetaEventReservationSchema,
+  );
 
 export const normalizeEmail = (value: unknown): string => String(value || "").trim().toLowerCase();
 
@@ -85,6 +111,54 @@ const isReplaySafeAuditStep = (key: string): boolean =>
 
 const isDuplicateKeyError = (error: unknown) =>
   typeof error === "object" && error !== null && "code" in error && Number((error as { code?: unknown }).code) === 11000;
+
+export const reserveTrackingAuditMetaEventId = async (key: string, proposedEventId: string): Promise<string> => {
+  const normalizedKey = String(key || "").trim();
+  const normalizedEventId = String(proposedEventId || "").trim() || normalizedKey;
+  if (!normalizedKey || !normalizedEventId) {
+    throw new Error("A Tracking Audit dedupe key and Meta event ID are required.");
+  }
+
+  const memoryReservation = metaEventReservationMemory.get(normalizedKey);
+  if (memoryReservation) return memoryReservation;
+
+  if (process.env.VITEST) {
+    metaEventReservationMemory.set(normalizedKey, normalizedEventId);
+    return normalizedEventId;
+  }
+
+  if (!process.env.MONGODB_URI?.trim()) {
+    throw new Error("Durable Tracking Audit Meta event ID reservation requires MONGODB_URI.");
+  }
+
+  await connectDB();
+  const now = new Date();
+  const candidate = {
+    key: normalizedKey,
+    eventId: normalizedEventId,
+    createdAt: now,
+    expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+  };
+
+  let reservation: TrackingAuditMetaEventReservationRecord | null = null;
+  try {
+    reservation = await TrackingAuditMetaEventReservation.findOneAndUpdate(
+      { key: normalizedKey },
+      { $setOnInsert: candidate },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    ).lean();
+  } catch (error) {
+    if (!isDuplicateKeyError(error)) throw error;
+    reservation = await TrackingAuditMetaEventReservation.findOne({ key: normalizedKey }).lean();
+  }
+
+  const reservedEventId = String(reservation?.eventId || "").trim();
+  if (!reservedEventId) {
+    throw new Error("Unable to reserve a stable Tracking Audit Meta event ID.");
+  }
+  metaEventReservationMemory.set(normalizedKey, reservedEventId);
+  return reservedEventId;
+};
 
 export const getIdempotencyRecord = async (key: string): Promise<Record<string, unknown> | null> => {
   if (!key) return null;
@@ -219,6 +293,7 @@ export const resetIdempotencyForTests = (): void => {
   if (process.env.VITEST) {
     memoryStore.clear();
     auditStepMemoryClaims.clear();
+    metaEventReservationMemory.clear();
   }
 };
 
