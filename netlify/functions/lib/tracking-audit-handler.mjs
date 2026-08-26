@@ -289,7 +289,7 @@ const getMetaEventSourceUrl = (data) => {
   }
 };
 
-const sendMetaConversionEvent = async (data, request) => {
+const sendMetaConversionEvent = async (data, request, eventId) => {
   const pixelId = getEnv("META_PIXEL_ID")?.trim();
   const accessToken = getEnv("META_CAPI_ACCESS_TOKEN")?.trim();
   if (!pixelId || !accessToken) {
@@ -298,7 +298,6 @@ const sendMetaConversionEvent = async (data, request) => {
   }
   const graphVersion = getEnv("META_GRAPH_API_VERSION")?.trim() || "v23.0";
   const testEventCode = getEnv("META_CAPI_TEST_EVENT_CODE")?.trim();
-  const eventId = data.metaEventId || buildLeadDedupeKey(data);
   const clientIp = getClientIp(request);
   const userAgent = request.headers.get("user-agent") || "";
   const body = {
@@ -404,7 +403,7 @@ const persistTrackingAudit = async (dedupeKey, data, audit, request) => {
   if (!saved) throw new Error("MongoDB Tracking Audit persistence is not configured.");
 };
 
-const completeAuditSideEffects = async (dedupeKey, data, audit, contactId, apiKey, request) => {
+const completeAuditSideEffects = async (dedupeKey, data, audit, contactId, apiKey, metaEventId, request) => {
   await runIdempotentAuditStep(
     dedupeKey,
     "audit-mongo-persistence",
@@ -441,7 +440,7 @@ const completeAuditSideEffects = async (dedupeKey, data, audit, contactId, apiKe
   await runIdempotentAuditStep(
     dedupeKey,
     "audit-meta-capi",
-    () => sendMetaConversionEvent(data, request),
+    () => sendMetaConversionEvent(data, request, metaEventId),
     "Meta CAPI Tracking Audit lead event failed after successful capture",
   );
 };
@@ -488,8 +487,12 @@ export default async (request) => {
     const contactId = typeof storedContactId === "string" || typeof storedContactId === "number"
       ? storedContactId
       : undefined;
-    await completeAuditSideEffects(dedupeKey, payload, audit, contactId, apiKey, request);
-    return json({ ok: true, pendingConfirmation: false, duplicate: true, metaEventId: payload.metaEventId }, { headers: corsHeaders });
+    const storedMetaEventId = existingSubmission?.metaEventId;
+    const metaEventId = typeof storedMetaEventId === "string" && storedMetaEventId.trim()
+      ? storedMetaEventId.trim()
+      : dedupeKey;
+    await completeAuditSideEffects(dedupeKey, payload, audit, contactId, apiKey, metaEventId, request);
+    return json({ ok: true, pendingConfirmation: false, duplicate: true, metaEventId }, { headers: corsHeaders });
   }
 
   try {
@@ -500,17 +503,19 @@ export default async (request) => {
       return json({ ok: false, message: "Unable to submit lead right now." }, { status: 502, headers: corsHeaders });
     }
 
+    const metaEventId = String(payload.metaEventId || "").trim() || dedupeKey;
     await markIdempotencyKey(dedupeKey, {
       source: payload.source,
       emailHash: dedupeKey.split("/").at(-1),
       listId: auditListId,
       auditMode: audit.mode,
+      metaEventId,
       ...(upsert.contactId ? { contactId: upsert.contactId } : {}),
     });
 
-    await completeAuditSideEffects(dedupeKey, payload, audit, upsert.contactId, apiKey, request);
+    await completeAuditSideEffects(dedupeKey, payload, audit, upsert.contactId, apiKey, metaEventId, request);
 
-    return json({ ok: true, pendingConfirmation: false, duplicate: false, metaEventId: payload.metaEventId }, { headers: corsHeaders });
+    return json({ ok: true, pendingConfirmation: false, duplicate: false, metaEventId }, { headers: corsHeaders });
   } catch (error) {
     console.error("Tracking Audit submission failed", { message: error instanceof Error ? error.message : String(error) });
     return json({ ok: false, message: "Unable to submit lead right now." }, { status: 500, headers: corsHeaders });
