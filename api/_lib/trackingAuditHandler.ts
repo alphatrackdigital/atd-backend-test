@@ -6,6 +6,7 @@ import {
   getIdempotencyRecord,
   markIdempotencyKey,
   releaseAuditStep,
+  reserveTrackingAuditMetaEventId,
 } from "./idempotency";
 import { connectDB } from "./db";
 import { Contact } from "./models/Contact";
@@ -135,6 +136,9 @@ const getHeader = (headers: Req["headers"], name: string) => {
   const value = headers[name] ?? headers[name.toLowerCase()];
   return Array.isArray(value) ? value[0] : value;
 };
+
+const isNonEmptyString = (value: unknown): value is string =>
+  typeof value === "string" && value.trim().length > 0;
 
 const truncateAttribute = (value: unknown, maxLength = 500) =>
   typeof value === "string" ? value.trim().slice(0, maxLength) : "";
@@ -604,7 +608,13 @@ const trackingAuditHandler = async (req: Req, res: Res) => {
   }
 
   const payload = req.body;
-  if (!payload || payload.source !== "tracking_audit_offer" || !payload.email?.trim() || !payload.firstName?.trim() || !payload.lastName?.trim()) {
+  if (
+    !payload ||
+    payload.source !== "tracking_audit_offer" ||
+    !isNonEmptyString(payload.email) ||
+    !isNonEmptyString(payload.firstName) ||
+    !isNonEmptyString(payload.lastName)
+  ) {
     return res.status(400).json({ ok: false, message: "Invalid submission payload." });
   }
 
@@ -621,6 +631,19 @@ const trackingAuditHandler = async (req: Req, res: Res) => {
   }
 
   const dedupeKey = buildLeadDedupeKey(payload as unknown as Record<string, unknown>);
+  const proposedMetaEventId = typeof payload.metaEventId === "string" && payload.metaEventId.trim()
+    ? payload.metaEventId.trim()
+    : dedupeKey;
+  let metaEventId: string;
+  try {
+    metaEventId = await reserveTrackingAuditMetaEventId(dedupeKey, proposedMetaEventId);
+  } catch (error) {
+    console.error("Tracking Audit Meta event ID reservation failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return res.status(500).json({ ok: false, message: "Unable to submit lead right now." });
+  }
+
   const existingSubmission = await getIdempotencyRecord(dedupeKey);
   const isDuplicate = Boolean(existingSubmission);
   if (isDuplicate) {
@@ -628,10 +651,6 @@ const trackingAuditHandler = async (req: Req, res: Res) => {
     const contactId = typeof storedContactId === "string" || typeof storedContactId === "number"
       ? storedContactId
       : undefined;
-    const storedMetaEventId = existingSubmission?.metaEventId;
-    const metaEventId = typeof storedMetaEventId === "string" && storedMetaEventId.trim()
-      ? storedMetaEventId.trim()
-      : dedupeKey;
     await completeAuditSideEffects(dedupeKey, payload, audit, contactId, brevoApiKey, metaEventId, req);
     return res.status(200).json({ ok: true, pendingConfirmation: false, duplicate: true, metaEventId });
   }
@@ -644,7 +663,6 @@ const trackingAuditHandler = async (req: Req, res: Res) => {
       return res.status(502).json({ ok: false, message: "Unable to submit lead right now." });
     }
 
-    const metaEventId = payload.metaEventId?.trim() || dedupeKey;
     await markIdempotencyKey(dedupeKey, {
       source: payload.source,
       emailHash: dedupeKey.split("/").at(-1),
