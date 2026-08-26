@@ -6,6 +6,7 @@ import {
   getIdempotencyRecord,
   markIdempotencyKey,
   releaseAuditStep,
+  reserveTrackingAuditMetaEventId,
 } from "./idempotency.mjs";
 import { saveLeadContact } from "./contact-persistence.mjs";
 import { hasDisallowedBrowserOrigin, isAllowedBrowserOrigin } from "./origin-policy.mjs";
@@ -58,6 +59,8 @@ const isRateLimited = (key) => {
   buckets.set(key, existing);
   return existing.count > RATE_LIMIT_MAX_REQUESTS;
 };
+
+const isNonEmptyString = (value) => typeof value === "string" && value.trim().length > 0;
 
 const truncateAttribute = (value, maxLength = 500) =>
   typeof value === "string" ? value.trim().slice(0, maxLength) : "";
@@ -466,7 +469,13 @@ export default async (request) => {
   } catch {
     return json({ ok: false, message: "Invalid JSON payload." }, { status: 400, headers: corsHeaders });
   }
-  if (!payload || payload.source !== "tracking_audit_offer" || !String(payload.email || "").trim() || !String(payload.firstName || "").trim() || !String(payload.lastName || "").trim()) {
+  if (
+    !payload ||
+    payload.source !== "tracking_audit_offer" ||
+    !isNonEmptyString(payload.email) ||
+    !isNonEmptyString(payload.firstName) ||
+    !isNonEmptyString(payload.lastName)
+  ) {
     return json({ ok: false, message: "Invalid submission payload." }, { status: 400, headers: corsHeaders });
   }
 
@@ -480,6 +489,19 @@ export default async (request) => {
   if (!apiKey) return json({ ok: false, message: "Lead service is not configured." }, { status: 500, headers: corsHeaders });
 
   const dedupeKey = buildLeadDedupeKey(payload);
+  const proposedMetaEventId = typeof payload.metaEventId === "string" && payload.metaEventId.trim()
+    ? payload.metaEventId.trim()
+    : dedupeKey;
+  let metaEventId;
+  try {
+    metaEventId = await reserveTrackingAuditMetaEventId(dedupeKey, proposedMetaEventId, getAuditStepStoreOptions());
+  } catch (error) {
+    console.error("Tracking Audit Meta event ID reservation failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return json({ ok: false, message: "Unable to submit lead right now." }, { status: 500, headers: corsHeaders });
+  }
+
   const existingSubmission = await getIdempotencyRecord(dedupeKey);
   const isDuplicate = Boolean(existingSubmission);
   if (isDuplicate) {
@@ -487,10 +509,6 @@ export default async (request) => {
     const contactId = typeof storedContactId === "string" || typeof storedContactId === "number"
       ? storedContactId
       : undefined;
-    const storedMetaEventId = existingSubmission?.metaEventId;
-    const metaEventId = typeof storedMetaEventId === "string" && storedMetaEventId.trim()
-      ? storedMetaEventId.trim()
-      : dedupeKey;
     await completeAuditSideEffects(dedupeKey, payload, audit, contactId, apiKey, metaEventId, request);
     return json({ ok: true, pendingConfirmation: false, duplicate: true, metaEventId }, { headers: corsHeaders });
   }
@@ -503,7 +521,6 @@ export default async (request) => {
       return json({ ok: false, message: "Unable to submit lead right now." }, { status: 502, headers: corsHeaders });
     }
 
-    const metaEventId = String(payload.metaEventId || "").trim() || dedupeKey;
     await markIdempotencyKey(dedupeKey, {
       source: payload.source,
       emailHash: dedupeKey.split("/").at(-1),
