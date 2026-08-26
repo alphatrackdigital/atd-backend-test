@@ -176,7 +176,7 @@ describe("Vercel leads application-first Tracking Audit flow", () => {
       },
     });
     expect(contactBody.attributes.AUDIT_APPLIED_AT).toEqual(expect.any(String));
-    expect(contactBody.attributes).not.toHaveProperty("AUDIT_LEGACY_AD_SPEND");
+    expect(contactBody.attributes.AUDIT_LEGACY_AD_SPEND).toBe("");
     expect(callsFor(fetchMock, "/crm/deals")).toHaveLength(0);
 
     const taskBody = JSON.parse(String((callsFor(fetchMock, "/crm/tasks")[0][1] as RequestInit).body));
@@ -214,7 +214,7 @@ describe("Vercel leads application-first Tracking Audit flow", () => {
       AUDIT_HANDOFF_STATUS: "No Sales Handoff",
       AUDIT_REVIEW_OUTCOME: "Manual Review",
     });
-    expect(attrs).not.toHaveProperty("AUDIT_AD_SPEND_BAND");
+    expect(attrs.AUDIT_AD_SPEND_BAND).toBe("");
     expect(callsFor(fetchMock, "/crm/tasks")).toHaveLength(1);
     expect(callsFor(fetchMock, "/crm/deals")).toHaveLength(0);
   });
