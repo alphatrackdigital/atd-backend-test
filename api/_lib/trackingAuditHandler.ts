@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-import { buildLeadDedupeKey, getIdempotencyRecord, markIdempotencyKey } from "./idempotency";
+import {
+  buildLeadDedupeKey,
+  claimAuditStep,
+  completeAuditStep,
+  getIdempotencyRecord,
+  markIdempotencyKey,
+  releaseAuditStep,
+} from "./idempotency";
 import { connectDB } from "./db";
 import { Contact } from "./models/Contact";
 import {
@@ -209,7 +216,7 @@ const buildBrevoAttributes = (
     ...(audit.company ? { COMPANY: audit.company } : {}),
     WEBSITE: audit.websiteUrl,
     AD_PLATFORMS: audit.adPlatforms.join(", "),
-    ...(audit.mode === "legacy" ? { AD_SPEND: audit.legacyMonthlyAdSpend } : {}),
+    AD_SPEND: audit.mode === "legacy" ? audit.legacyMonthlyAdSpend : "",
     ...auditLifecycleAttributes(audit, timestamp),
     LEAD_SOURCE: "tracking_audit_offer",
     ...getSourceLifecycleAttributes(data, existingContact, timestamp),
@@ -449,35 +456,37 @@ const saveAuditToMongoDB = async (
   data: TrackingAuditPayload,
   audit: NormalizedTrackingAuditApplication,
   ip: string,
+  submissionKey: string,
 ) => {
-  if (!process.env.MONGODB_URI) return;
-  try {
-    await connectDB();
-    await Contact.create({
-      source: "tracking_audit_offer",
-      firstName: data.firstName,
-      lastName: data.lastName,
-      email: data.email,
-      company: audit.company,
-      websiteUrl: audit.websiteUrl,
-      monthlyAdSpend: audit.mode === "legacy" ? audit.legacyMonthlyAdSpend : "",
-      legacyMonthlyAdSpend: audit.legacyMonthlyAdSpend,
-      monthlyAdSpendBand: audit.monthlyAdSpendBand,
-      adPlatforms: audit.adPlatforms.join(", "),
-      industry: audit.industry,
-      role: audit.role,
-      decisionInfluence: audit.decisionInfluence,
-      trackingMaturity: audit.trackingMaturity,
-      primaryConversionType: audit.primaryConversionType,
-      measurementProblem: audit.measurementProblem,
-      urgency: audit.urgency,
-      ip,
-    });
-  } catch (error) {
-    console.error("[tracking-audit] MongoDB save error (non-fatal):", {
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
+  if (!process.env.MONGODB_URI) throw new Error("MONGODB_URI environment variable is not set.");
+  await connectDB();
+  await Contact.updateOne(
+    { source: "tracking_audit_offer", submissionKey },
+    {
+      $setOnInsert: {
+        source: "tracking_audit_offer",
+        submissionKey,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        email: data.email,
+        company: audit.company,
+        websiteUrl: audit.websiteUrl,
+        monthlyAdSpend: audit.mode === "legacy" ? audit.legacyMonthlyAdSpend : "",
+        legacyMonthlyAdSpend: audit.legacyMonthlyAdSpend,
+        monthlyAdSpendBand: audit.monthlyAdSpendBand,
+        adPlatforms: audit.adPlatforms.join(", "),
+        industry: audit.industry,
+        role: audit.role,
+        decisionInfluence: audit.decisionInfluence,
+        trackingMaturity: audit.trackingMaturity,
+        primaryConversionType: audit.primaryConversionType,
+        measurementProblem: audit.measurementProblem,
+        urgency: audit.urgency,
+        ip,
+      },
+    },
+    { upsert: true },
+  );
 };
 
 const logNonFatal = (label: string, error: unknown) => {
@@ -491,12 +500,16 @@ const runIdempotentAuditStep = async (
   errorLabel: string,
 ) => {
   const stepKey = `${dedupeKey}/${step}`;
-  if (await getIdempotencyRecord(stepKey)) return;
-
+  let claimed = false;
   try {
+    claimed = await claimAuditStep(stepKey);
+    if (!claimed) return;
     await action();
-    await markIdempotencyKey(stepKey, { completed: true });
+    await completeAuditStep(stepKey);
   } catch (error) {
+    if (claimed) {
+      await releaseAuditStep(stepKey).catch((releaseError) => logNonFatal(`${errorLabel} (claim release failed)`, releaseError));
+    }
     logNonFatal(errorLabel, error);
   }
 };
@@ -509,9 +522,15 @@ const completeAuditSideEffects = async (
   brevoApiKey: string,
   req: Req,
 ) => {
+  await runIdempotentAuditStep(
+    dedupeKey,
+    "audit-mongo-persistence",
+    () => saveAuditToMongoDB(data, audit, getClientIp(req), dedupeKey),
+    "MongoDB Tracking Audit persistence failed after successful Brevo capture",
+  );
+
   let resolvedContactId = contactId;
-  const taskKey = `${dedupeKey}/audit-review-task`;
-  if (!(await getIdempotencyRecord(taskKey)) && !resolvedContactId) {
+  if (!resolvedContactId) {
     resolvedContactId = (await getBrevoContactByEmail(data.email, brevoApiKey))?.id;
   }
 
@@ -608,7 +627,6 @@ const trackingAuditHandler = async (req: Req, res: Res) => {
       ...(upsert.contactId ? { contactId: upsert.contactId } : {}),
     });
 
-    await saveAuditToMongoDB(payload, audit, ip);
     await completeAuditSideEffects(dedupeKey, payload, audit, upsert.contactId, brevoApiKey, req);
 
     return res.status(200).json({ ok: true, pendingConfirmation: false, duplicate: false, metaEventId: payload.metaEventId });
