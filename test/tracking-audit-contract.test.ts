@@ -51,7 +51,7 @@ describe("Tracking Audit contract", () => {
     expect(attrs.AUDIT_LEGACY_AD_SPEND).toBe("$1k - $5k / mo");
     expect(attrs.AUDIT_STATUS).toBe("Manual Review");
     expect(attrs.AUDIT_HANDOFF_STATUS).toBe("No Sales Handoff");
-    expect(attrs).not.toHaveProperty("AUDIT_AD_SPEND_BAND");
+    expect(attrs.AUDIT_AD_SPEND_BAND).toBe("");
   });
 
   it("rejects unknown canonical enum values", () => {
@@ -82,6 +82,6 @@ describe("Tracking Audit contract", () => {
     expect(attrs.AUDIT_HANDOFF_STATUS).toBe("No Sales Handoff");
     expect(attrs.AUDIT_AD_SPEND_BAND).toBe("6000_14999");
     expect(attrs.AUDIT_PAID_CHANNELS).toEqual(["meta_ads", "google_ads"]);
-    expect(attrs).not.toHaveProperty("AUDIT_LEGACY_AD_SPEND");
+    expect(attrs.AUDIT_LEGACY_AD_SPEND).toBe("");
   });
 });
