@@ -1,10 +1,24 @@
 import { createHash } from "node:crypto";
+import mongoose from "mongoose";
 
 const memoryStore = globalThis.__atdConversionIdempotency ?? new Map();
 globalThis.__atdConversionIdempotency = memoryStore;
+const testAuditStepClaims = globalThis.__atdAuditStepClaims ?? new Map();
+globalThis.__atdAuditStepClaims = testAuditStepClaims;
 
 const STORE_NAME = "atd-conversion-idempotency";
 let testDurableStore;
+
+const AuditStepClaimSchema = new mongoose.Schema({
+  key: { type: String, required: true, unique: true },
+  status: { type: String, enum: ["in_progress", "completed"], required: true },
+  leaseUntil: { type: Date, default: null },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
+  expiresAt: { type: Date, required: true, expires: 0 },
+});
+
+const AuditStepClaim = mongoose.models.AuditStepClaim || mongoose.model("AuditStepClaim", AuditStepClaimSchema);
 
 export class DurableIdempotencyError extends Error {
   constructor(message = "Durable idempotency storage is unavailable.") {
@@ -34,6 +48,15 @@ const getBlobStore = async () => {
     return null;
   }
 };
+
+const connectAuditStepStore = async (mongoUri, databaseName = "alphatrack") => {
+  if (!mongoUri) throw new DurableIdempotencyError("Durable Tracking Audit step claims require MONGODB_URI.");
+  if (mongoose.connection.readyState === 0) {
+    await mongoose.connect(mongoUri, { dbName: databaseName });
+  }
+};
+
+const isDuplicateKeyError = (error) => Number(error?.code) === 11000;
 
 export const getDurableIdempotencyRecord = async (key) => {
   if (!key) throw new DurableIdempotencyError("A durable idempotency key is required.");
@@ -110,9 +133,76 @@ export const markIdempotencyKey = async (key, payload = {}) => {
   }
 };
 
+export const claimAuditStep = async (key, { mongoUri, databaseName = "alphatrack", leaseMs = 60_000 } = {}) => {
+  if (!key) return false;
+  const nowMs = Date.now();
+
+  if (process.env.VITEST) {
+    const existing = testAuditStepClaims.get(key);
+    if (existing?.status === "completed") return false;
+    if (existing?.status === "in_progress" && (existing.leaseUntil || 0) > nowMs) return false;
+    testAuditStepClaims.set(key, { status: "in_progress", leaseUntil: nowMs + leaseMs });
+    return true;
+  }
+
+  await connectAuditStepStore(mongoUri, databaseName);
+  const now = new Date(nowMs);
+  const leaseUntil = new Date(nowMs + leaseMs);
+  const expiresAt = new Date(nowMs + 7 * 24 * 60 * 60 * 1000);
+
+  try {
+    await AuditStepClaim.create({ key, status: "in_progress", leaseUntil, createdAt: now, updatedAt: now, expiresAt });
+    return true;
+  } catch (error) {
+    if (!isDuplicateKeyError(error)) throw error;
+  }
+
+  const reclaimed = await AuditStepClaim.findOneAndUpdate(
+    { key, status: "in_progress", leaseUntil: { $lte: now } },
+    { $set: { leaseUntil, updatedAt: now, expiresAt } },
+    { new: true },
+  ).lean();
+  return Boolean(reclaimed);
+};
+
+export const completeAuditStep = async (key, { mongoUri, databaseName = "alphatrack" } = {}) => {
+  if (!key) return;
+  if (process.env.VITEST) {
+    testAuditStepClaims.set(key, { status: "completed" });
+    return;
+  }
+
+  await connectAuditStepStore(mongoUri, databaseName);
+  const now = new Date();
+  await AuditStepClaim.updateOne(
+    { key, status: "in_progress" },
+    {
+      $set: {
+        status: "completed",
+        leaseUntil: null,
+        updatedAt: now,
+        expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+      },
+    },
+  );
+};
+
+export const releaseAuditStep = async (key, { mongoUri, databaseName = "alphatrack" } = {}) => {
+  if (!key) return;
+  if (process.env.VITEST) {
+    const existing = testAuditStepClaims.get(key);
+    if (existing?.status === "in_progress") testAuditStepClaims.delete(key);
+    return;
+  }
+
+  await connectAuditStepStore(mongoUri, databaseName);
+  await AuditStepClaim.deleteOne({ key, status: "in_progress" });
+};
+
 export const resetIdempotencyForTests = () => {
   if (process.env.VITEST) {
     memoryStore.clear();
+    testAuditStepClaims.clear();
     testDurableStore = undefined;
   }
 };

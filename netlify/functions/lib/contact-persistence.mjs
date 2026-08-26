@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 const ContactSchema = new mongoose.Schema(
   {
     source: { type: String, enum: ["contact_form", "tracking_audit_offer"], required: true },
+    submissionKey: { type: String, trim: true, default: "", index: true },
     firstName: { type: String, required: true, trim: true },
     lastName: { type: String, required: true, trim: true },
     email: { type: String, required: true, trim: true, lowercase: true },
@@ -39,6 +40,7 @@ const toStoredList = (value) =>
 
 export const buildContactDocument = (payload, ip) => ({
   source: payload.source,
+  submissionKey: payload.submissionKey || "",
   firstName: payload.firstName || "",
   lastName: payload.lastName || "",
   email: payload.email,
@@ -70,6 +72,17 @@ export const saveLeadContact = async (payload, ip, mongoUri, databaseName = "alp
   if (mongoose.connection.readyState === 0) {
     await mongoose.connect(mongoUri, { dbName: databaseName });
   }
-  await Contact.create(buildContactDocument(payload, ip));
+
+  const document = buildContactDocument(payload, ip);
+  if (payload.source === "tracking_audit_offer" && payload.submissionKey) {
+    await Contact.updateOne(
+      { source: "tracking_audit_offer", submissionKey: payload.submissionKey },
+      { $setOnInsert: document },
+      { upsert: true },
+    );
+    return true;
+  }
+
+  await Contact.create(document);
   return true;
 };

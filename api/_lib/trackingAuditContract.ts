@@ -206,23 +206,22 @@ export const auditLifecycleAttributes = (
 ): Record<string, string | string[]> => ({
   ...(audit.company ? { COMPANY: audit.company } : {}),
   WEBSITE_URL: audit.websiteUrl,
-  ...(audit.industry ? { AUDIT_INDUSTRY: audit.industry } : {}),
-  ...(audit.role ? { AUDIT_ROLE: audit.role } : {}),
-  ...(audit.decisionInfluence ? { AUDIT_DECISION_INFLUENCE: audit.decisionInfluence } : {}),
-  ...(audit.monthlyAdSpendBand ? { AUDIT_AD_SPEND_BAND: audit.monthlyAdSpendBand } : {}),
+  AUDIT_INDUSTRY: audit.mode === "canonical" ? audit.industry : "",
+  AUDIT_ROLE: audit.mode === "canonical" ? audit.role : "",
+  AUDIT_DECISION_INFLUENCE: audit.mode === "canonical" ? audit.decisionInfluence : "",
+  AUDIT_AD_SPEND_BAND: audit.mode === "canonical" ? audit.monthlyAdSpendBand : "",
   ...(audit.adPlatforms.length ? { AUDIT_PAID_CHANNELS: audit.adPlatforms } : {}),
-  ...(audit.trackingMaturity ? { AUDIT_TRACKING_MATURITY: audit.trackingMaturity } : {}),
-  ...(audit.primaryConversionType ? { AUDIT_PRIMARY_CONVERSION: audit.primaryConversionType } : {}),
-  ...(audit.measurementProblem ? { AUDIT_MEASUREMENT_PROBLEM: audit.measurementProblem } : {}),
-  ...(audit.urgency ? { AUDIT_URGENCY: audit.urgency } : {}),
+  AUDIT_TRACKING_MATURITY: audit.mode === "canonical" ? audit.trackingMaturity : "",
+  AUDIT_PRIMARY_CONVERSION: audit.mode === "canonical" ? audit.primaryConversionType : "",
+  AUDIT_MEASUREMENT_PROBLEM: audit.mode === "canonical" ? audit.measurementProblem : "",
+  AUDIT_URGENCY: audit.mode === "canonical" ? audit.urgency : "",
   AUDIT_STATUS: audit.mode === "canonical" ? "Applied" : "Manual Review",
   AUDIT_HANDOFF_STATUS: "No Sales Handoff",
   AUDIT_APPLIED_AT: timestamp,
-  ...(audit.mode === "legacy"
-    ? {
-        AUDIT_LEGACY_AD_SPEND: audit.legacyMonthlyAdSpend,
-        AUDIT_REVIEW_OUTCOME: "Manual Review",
-        AUDIT_REVIEW_RATIONALE: "Legacy pre-v1.0 Tracking Audit application payload; structured qualification fields require review.",
-      }
-    : {}),
+  AUDIT_LEGACY_AD_SPEND: audit.mode === "legacy" ? audit.legacyMonthlyAdSpend : "",
+  AUDIT_REVIEW_OUTCOME: audit.mode === "legacy" ? "Manual Review" : "",
+  AUDIT_REVIEW_RATIONALE:
+    audit.mode === "legacy"
+      ? "Legacy pre-v1.0 Tracking Audit application payload; structured qualification fields require review."
+      : "",
 });
