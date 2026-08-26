@@ -102,21 +102,33 @@ const CONVERSIONS = canonicalSet(AUDIT_PRIMARY_CONVERSIONS);
 const PROBLEMS = canonicalSet(AUDIT_MEASUREMENT_PROBLEMS);
 const URGENCY = canonicalSet(AUDIT_URGENCY);
 
-export const normalizeAuditChannels = (value: unknown): string[] => {
+const rawAuditChannels = (value: unknown): string[] => {
   const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[,;]+/) : [];
-  return unique(
-    raw
-      .map((item) => asTrimmedString(item))
-      .filter(Boolean)
-      .map((item) => (CHANNELS.has(item) ? item : LEGACY_CHANNEL_MAP[item] || ""))
-      .filter(Boolean),
-  );
+  return raw.map((item) => asTrimmedString(item)).filter(Boolean);
 };
 
-const hasCanonicalFields = (data: Record<string, unknown>) =>
-  ["company", "industry", "role", "decisionInfluence", "trackingMaturity", "primaryConversionType", "measurementProblem", "urgency"]
-    .every((key) => asTrimmedString(data[key]).length > 0) &&
-  (asTrimmedString(data.monthlyAdSpendBand).length > 0 || asTrimmedString(data.monthlyAdSpend).length > 0);
+const normalizeAuditChannel = (item: string): string =>
+  CHANNELS.has(item) ? item : LEGACY_CHANNEL_MAP[item] || "";
+
+export const normalizeAuditChannels = (value: unknown): string[] =>
+  unique(rawAuditChannels(value).map(normalizeAuditChannel).filter(Boolean));
+
+const unknownAuditChannels = (value: unknown): string[] =>
+  rawAuditChannels(value).filter((item) => !normalizeAuditChannel(item));
+
+const CANONICAL_ONLY_FIELDS = [
+  "industry",
+  "role",
+  "decisionInfluence",
+  "monthlyAdSpendBand",
+  "trackingMaturity",
+  "primaryConversionType",
+  "measurementProblem",
+  "urgency",
+] as const;
+
+const hasCanonicalShape = (data: Record<string, unknown>) =>
+  CANONICAL_ONLY_FIELDS.some((key) => asTrimmedString(data[key]).length > 0);
 
 export const normalizeTrackingAuditApplication = (
   input: unknown,
@@ -126,7 +138,8 @@ export const normalizeTrackingAuditApplication = (
   const websiteUrl = asTrimmedString(data.websiteUrl);
   const company = asTrimmedString(data.company);
   const channels = normalizeAuditChannels(data.adPlatforms);
-  const canonical = hasCanonicalFields(data);
+  const invalidChannels = unknownAuditChannels(data.adPlatforms);
+  const canonical = hasCanonicalShape(data);
 
   if (!websiteUrl) return { ok: false, errors: ["websiteUrl"] };
 
@@ -172,7 +185,7 @@ export const normalizeTrackingAuditApplication = (
     !ROLES.has(role) ? "role" : "",
     !DECISIONS.has(decisionInfluence) ? "decisionInfluence" : "",
     !SPEND_BANDS.has(monthlyAdSpendBand) ? "monthlyAdSpendBand" : "",
-    channels.length === 0 ? "adPlatforms" : "",
+    channels.length === 0 || invalidChannels.length > 0 ? "adPlatforms" : "",
     !MATURITY.has(trackingMaturity) ? "trackingMaturity" : "",
     !CONVERSIONS.has(primaryConversionType) ? "primaryConversionType" : "",
     !PROBLEMS.has(measurementProblem) ? "measurementProblem" : "",
