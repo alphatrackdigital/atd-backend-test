@@ -68,14 +68,14 @@ const installProviderFetch = (options: { failReceiptOnce?: boolean; failTaskOnce
     }
     if (target === "https://api.brevo.com/v3/crm/tasks") {
       taskAttempts += 1;
-      if (options.failTaskOnce && taskAttempts === 1) return new Response("", { status: 503 });
+      if (options.failTaskOnce && taskAttempts === 1) return new Response("", { status: 400 });
       return new Response(JSON.stringify({ id: "task-1" }), { status: 201 });
     }
     if (target === "https://api.brevo.com/v3/smtp/email") {
       const body = JSON.parse(String(init.body));
       if (body.subject === "We received your Tracking Audit application") {
         receiptAttempts += 1;
-        if (options.failReceiptOnce && receiptAttempts === 1) return new Response("", { status: 503 });
+        if (options.failReceiptOnce && receiptAttempts === 1) return new Response("", { status: 400 });
       }
       return new Response(JSON.stringify({ messageId: "message-1" }), { status: 201 });
     }
