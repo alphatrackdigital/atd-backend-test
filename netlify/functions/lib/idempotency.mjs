@@ -4,6 +4,14 @@ const memoryStore = globalThis.__atdConversionIdempotency ?? new Map();
 globalThis.__atdConversionIdempotency = memoryStore;
 
 const STORE_NAME = "atd-conversion-idempotency";
+let testDurableStore;
+
+export class DurableIdempotencyError extends Error {
+  constructor(message = "Durable idempotency storage is unavailable.") {
+    super(message);
+    this.name = "DurableIdempotencyError";
+  }
+}
 
 export const normalizeEmail = (value) => String(value || "").trim().toLowerCase();
 
@@ -17,13 +25,49 @@ const dayStamp = (date = new Date()) => date.toISOString().slice(0, 10);
 const safeKey = (parts) => parts.map((part) => String(part).replace(/[^a-zA-Z0-9._-]/g, "-")).join("/");
 
 const getBlobStore = async () => {
-  if (process.env.VITEST) return null;
+  if (process.env.VITEST) return testDurableStore || null;
 
   try {
     const { getStore } = await import("@netlify/blobs");
     return getStore({ name: STORE_NAME, consistency: "strong" });
   } catch {
     return null;
+  }
+};
+
+export const getDurableIdempotencyRecord = async (key) => {
+  if (!key) throw new DurableIdempotencyError("A durable idempotency key is required.");
+
+  const store = await getBlobStore();
+  if (!store) throw new DurableIdempotencyError();
+
+  try {
+    const record = await store.get(key, { type: "json" });
+    if (record) memoryStore.set(key, record);
+    return record || null;
+  } catch {
+    throw new DurableIdempotencyError();
+  }
+};
+
+export const setDurableIdempotencyRecord = async (key, record) => {
+  if (!key) throw new DurableIdempotencyError("A durable idempotency key is required.");
+
+  const store = await getBlobStore();
+  if (!store) throw new DurableIdempotencyError();
+
+  const nextRecord = {
+    ...record,
+    key,
+    updatedAt: new Date().toISOString(),
+  };
+
+  try {
+    await store.setJSON(key, nextRecord);
+    memoryStore.set(key, nextRecord);
+    return nextRecord;
+  } catch {
+    throw new DurableIdempotencyError();
   }
 };
 
@@ -67,7 +111,14 @@ export const markIdempotencyKey = async (key, payload = {}) => {
 };
 
 export const resetIdempotencyForTests = () => {
-  if (process.env.VITEST) memoryStore.clear();
+  if (process.env.VITEST) {
+    memoryStore.clear();
+    testDurableStore = undefined;
+  }
+};
+
+export const setDurableIdempotencyStoreForTests = (store) => {
+  if (process.env.VITEST) testDurableStore = store;
 };
 
 export const buildLeadDedupeKey = (payload) => {

@@ -1,0 +1,71 @@
+name: Backend CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  verify:
+    if: github.event_name == 'push' || github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require owner approval for external contributors
+        if: github.event_name != 'push' && github.event.pull_request.user.login != 'alphatrackdigital'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner,
+              repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+
+            const approvedCurrentHead = reviews.some((review) =>
+              review.user?.login === 'alphatrackdigital' &&
+              review.state === 'APPROVED' &&
+              review.commit_id === pr.head.sha
+            );
+
+            if (!approvedCurrentHead) {
+              core.setFailed(
+                'External-contributor PRs require approval from @alphatrackdigital on the current head commit before merge.'
+              );
+            }
+
+      - name: Checkout pull request
+        if: github.event_name != 'push'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Checkout main push
+        if: github.event_name == 'push'
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Type-check
+        run: npm run type-check

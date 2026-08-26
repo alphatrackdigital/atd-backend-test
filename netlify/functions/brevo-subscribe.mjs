@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { buildExitPopupDedupeKey, getIdempotencyRecord, markIdempotencyKey } from "./lib/idempotency.mjs";
+import { hasDisallowedBrowserOrigin, isAllowedBrowserOrigin } from "./lib/origin-policy.mjs";
 
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 5;
@@ -19,35 +20,6 @@ const json = (payload, init = {}) =>
     },
   });
 
-const allowedHostnames = new Set([
-  "alphatrack.digital",
-  "www.alphatrack.digital",
-  "alphatrackdigital.com",
-  "www.alphatrackdigital.com",
-  "alphatrackdigital.netlify.app",
-  "alphatra-serv.netlify.app",
-  "backend--alphatra-serv.netlify.app",
-  "website-internal-test.vercel.app",
-  "atd-website-test.vercel.app",
-  "atd-website-test-alphatrackdigitals-projects.vercel.app",
-]);
-
-const isAllowedOrigin = (origin) => {
-  if (!origin) return false;
-
-  try {
-    const url = new URL(origin);
-    if (url.protocol !== "https:") return false;
-    if (allowedHostnames.has(url.hostname)) return true;
-    return (
-      url.hostname.endsWith("-alphatrackdigitals-projects.vercel.app") ||
-      url.hostname.endsWith("--alphatrackdigital.netlify.app")
-    );
-  } catch {
-    return false;
-  }
-};
-
 const getCorsHeaders = (request) => {
   const origin = request.headers.get("origin");
   const headers = {
@@ -55,7 +27,7 @@ const getCorsHeaders = (request) => {
     "access-control-allow-headers": "Content-Type, Authorization",
   };
 
-  if (isAllowedOrigin(origin)) {
+  if (isAllowedBrowserOrigin(origin, getEnv("CONTEXT"), getEnv("ALLOWED_ORIGINS"))) {
     headers["access-control-allow-origin"] = origin;
     headers.vary = "Origin";
   }
@@ -323,6 +295,10 @@ const sendMetaConversionEvent = async (lead, request) => {
 export default async (request) => {
   const corsHeaders = getCorsHeaders(request);
 
+  if (hasDisallowedBrowserOrigin(request, getEnv("CONTEXT"), getEnv("ALLOWED_ORIGINS"))) {
+    return json({ ok: false, message: "Origin not allowed." }, { status: 403, headers: corsHeaders });
+  }
+
   if (request.method === "OPTIONS") {
     return new Response(null, {
       status: 204,
@@ -395,11 +371,9 @@ export default async (request) => {
     });
 
     if (!brevoResponse.ok) {
-      const errorText = await brevoResponse.text().catch(() => "");
       console.error("Brevo exit popup contact upsert failed", {
         status: brevoResponse.status,
         listId: brevoListId,
-        message: errorText.slice(0, 300),
       });
 
       return json(

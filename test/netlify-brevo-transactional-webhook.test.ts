@@ -30,6 +30,18 @@ describe("brevo transactional webhook function", () => {
     });
   });
 
+  it("rejects webhook secrets supplied in the URL query string", async () => {
+    const response = await handler(
+      new Request(`${webhookUrl}?token=test-webhook-secret`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ event: "delivered" }),
+      }),
+    );
+
+    expect(response.status).toBe(401);
+  });
+
   it("accepts bearer-authenticated Brevo transactional events", async () => {
     const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
 

@@ -82,6 +82,31 @@ deployment platform; never commit secrets.
 `META_CAPI_TEST_EVENT_CODE` is temporary: set it only during a controlled Meta
 Test Events session, redeploy, verify, then remove it and redeploy again.
 
+## Tracking Audit Release Gate
+
+The Tracking Audit landing page is application-first. Do not release a frontend
+that submits the canonical application payload until the corresponding backend
+handler is live on `alphatra-serv`.
+
+For a pre-production rehearsal, keep non-production Netlify deploys access-
+controlled and use isolated QA persistence. Do not broaden or copy production
+MongoDB, Brevo, or Meta credentials into preview contexts merely to make an E2E
+check pass.
+
+Before the backend release:
+
+- verify Backend CI on the exact release head;
+- verify the Vercel and Netlify Deploy Preview builds on the exact release head;
+- use a dedicated QA MongoDB database for preview persistence;
+- keep preview Brevo and Meta credentials absent unless dedicated test-safe
+  credentials are available;
+- prepare a controlled production canonical canary and downstream verification
+  sequence for Brevo, MongoDB, transactional email, CRM review task, and Meta.
+
+After the backend release, verify the production canonical application endpoint
+before deploying the cPanel frontend. Keep paid campaign activation separate
+from the website/backend release gate.
+
 ## Workflow
 
 ```sh
