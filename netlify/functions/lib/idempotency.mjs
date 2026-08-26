@@ -6,6 +6,8 @@ const memoryStore = globalThis.__atdConversionIdempotency ?? new Map();
 globalThis.__atdConversionIdempotency = memoryStore;
 const auditStepMemoryClaims = globalThis.__atdAuditStepClaims ?? new Map();
 globalThis.__atdAuditStepClaims = auditStepMemoryClaims;
+const metaEventReservationMemory = globalThis.__atdTrackingAuditMetaEventReservations ?? new Map();
+globalThis.__atdTrackingAuditMetaEventReservations = metaEventReservationMemory;
 
 const STORE_NAME = "atd-conversion-idempotency";
 let testDurableStore;
@@ -19,7 +21,17 @@ const AuditStepClaimSchema = new mongoose.Schema({
   expiresAt: { type: Date, required: true, expires: 0 },
 });
 
+const TrackingAuditMetaEventReservationSchema = new mongoose.Schema({
+  key: { type: String, required: true, unique: true },
+  eventId: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now },
+  expiresAt: { type: Date, required: true, expires: 0 },
+});
+
 const AuditStepClaim = mongoose.models.AuditStepClaim || mongoose.model("AuditStepClaim", AuditStepClaimSchema);
+const TrackingAuditMetaEventReservation =
+  mongoose.models.TrackingAuditMetaEventReservation ||
+  mongoose.model("TrackingAuditMetaEventReservation", TrackingAuditMetaEventReservationSchema);
 
 export class DurableIdempotencyError extends Error {
   constructor(message = "Durable idempotency storage is unavailable.") {
@@ -83,6 +95,54 @@ const connectAuditStepStore = async (mongoUri, databaseName = "alphatrack") => {
 };
 
 const isDuplicateKeyError = (error) => Number(error?.code) === 11000;
+
+export const reserveTrackingAuditMetaEventId = async (
+  key,
+  proposedEventId,
+  { mongoUri, databaseName = "alphatrack" } = {},
+) => {
+  const normalizedKey = String(key || "").trim();
+  const normalizedEventId = String(proposedEventId || "").trim() || normalizedKey;
+  if (!normalizedKey || !normalizedEventId) {
+    throw new DurableIdempotencyError("A Tracking Audit dedupe key and Meta event ID are required.");
+  }
+
+  const memoryReservation = metaEventReservationMemory.get(normalizedKey);
+  if (memoryReservation) return memoryReservation;
+
+  if (process.env.VITEST) {
+    metaEventReservationMemory.set(normalizedKey, normalizedEventId);
+    return normalizedEventId;
+  }
+
+  await connectAuditStepStore(mongoUri, databaseName);
+  const now = new Date();
+  const candidate = {
+    key: normalizedKey,
+    eventId: normalizedEventId,
+    createdAt: now,
+    expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+  };
+
+  let reservation;
+  try {
+    reservation = await TrackingAuditMetaEventReservation.findOneAndUpdate(
+      { key: normalizedKey },
+      { $setOnInsert: candidate },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    ).lean();
+  } catch (error) {
+    if (!isDuplicateKeyError(error)) throw error;
+    reservation = await TrackingAuditMetaEventReservation.findOne({ key: normalizedKey }).lean();
+  }
+
+  const reservedEventId = String(reservation?.eventId || "").trim();
+  if (!reservedEventId) {
+    throw new DurableIdempotencyError("Unable to reserve a stable Tracking Audit Meta event ID.");
+  }
+  metaEventReservationMemory.set(normalizedKey, reservedEventId);
+  return reservedEventId;
+};
 
 export const getDurableIdempotencyRecord = async (key) => {
   if (!key) throw new DurableIdempotencyError("A durable idempotency key is required.");
@@ -251,6 +311,7 @@ export const resetIdempotencyForTests = () => {
   if (process.env.VITEST) {
     memoryStore.clear();
     auditStepMemoryClaims.clear();
+    metaEventReservationMemory.clear();
     testDurableStore = undefined;
   }
 };
