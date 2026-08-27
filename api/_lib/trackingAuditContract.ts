@@ -147,10 +147,13 @@ export const normalizeTrackingAuditApplication = (
 
   if (!canonical) {
     const legacySpend = asTrimmedString(data.monthlyAdSpend);
-    if (!legacySpend || channels.length === 0) {
+    if (!legacySpend || channels.length === 0 || invalidChannels.length > 0) {
       return {
         ok: false,
-        errors: [!legacySpend ? "monthlyAdSpend" : "", channels.length === 0 ? "adPlatforms" : ""].filter(Boolean),
+        errors: [
+          !legacySpend ? "monthlyAdSpend" : "",
+          channels.length === 0 || invalidChannels.length > 0 ? "adPlatforms" : "",
+        ].filter(Boolean),
       };
     }
     return {
