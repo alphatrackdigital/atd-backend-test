@@ -8,10 +8,21 @@ export const multipleChoiceChannels = Object.freeze([
   "none_currently",
 ]);
 
-const normalizeOptions = (value) =>
+const rawOptionsMatchIgnoringOrder = (actual, expected) => {
+  if (!Array.isArray(actual) || !Array.isArray(expected)) return false;
+  if (actual.length !== expected.length) return false;
+  if (!actual.every((item) => typeof item === "string")) return false;
+  if (!expected.every((item) => typeof item === "string")) return false;
+
+  const sortedActual = [...actual].sort();
+  const sortedExpected = [...expected].sort();
+  return sortedExpected.every((option, index) => option === sortedActual[index]);
+};
+
+const describeOptions = (value) =>
   Array.isArray(value)
-    ? [...new Set(value.filter((item) => typeof item === "string").map((item) => item.trim()).filter(Boolean))].sort()
-    : [];
+    ? value.map((item) => JSON.stringify(item)).join(", ")
+    : "(not an array)";
 
 export const validateExistingAttribute = (current, definition) => {
   const expectedType = `normal/${definition.type}`;
@@ -22,17 +33,14 @@ export const validateExistingAttribute = (current, definition) => {
   }
 
   if (definition.multiCategoryOptions) {
-    const expectedOptions = normalizeOptions(definition.multiCategoryOptions);
-    const actualOptions = normalizeOptions(current.multiCategoryOptions);
-    const optionsMatch =
-      expectedOptions.length === actualOptions.length &&
-      expectedOptions.every((option, index) => option === actualOptions[index]);
+    const expectedOptions = definition.multiCategoryOptions;
+    const actualOptions = current.multiCategoryOptions;
 
-    if (!optionsMatch) {
+    if (!rawOptionsMatchIgnoringOrder(actualOptions, expectedOptions)) {
       return {
         ok: false,
-        expected: `${expectedType} options=[${expectedOptions.join(", ")}]`,
-        actual: `${actualType} options=[${actualOptions.join(", ")}]`,
+        expected: `${expectedType} options=[${describeOptions(expectedOptions)}]`,
+        actual: `${actualType} options=[${describeOptions(actualOptions)}]`,
       };
     }
   }
