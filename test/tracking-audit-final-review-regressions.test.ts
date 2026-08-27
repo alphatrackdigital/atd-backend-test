@@ -186,6 +186,28 @@ describe("Tracking Audit final review regressions", () => {
       expect(result.errors).toContain("adPlatforms");
     });
 
+    it(`${runtime} rejects non-string canonical channel entries instead of dropping them`, () => {
+      const result = normalizeAudit({
+        ...canonicalAudit(`${runtime.toLowerCase()}-mixed-canonical@example.com`),
+        adPlatforms: ["meta_ads", 42],
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.errors).toContain("adPlatforms");
+    });
+
+    it(`${runtime} rejects non-string legacy channel entries instead of dropping them`, () => {
+      const result = normalizeAudit({
+        source: "tracking_audit_offer",
+        websiteUrl: "https://legacy-mixed.example.com",
+        monthlyAdSpend: "$1k - $5k / mo",
+        adPlatforms: ["Google Ads", 42],
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.errors).toContain("adPlatforms");
+    });
+
     it(`${runtime} rejects unknown legacy channels instead of silently dropping them`, () => {
       const result = normalizeAudit({
         source: "tracking_audit_offer",
