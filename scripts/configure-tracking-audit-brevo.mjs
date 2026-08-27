@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { multipleChoiceChannels, validateExistingAttribute } from "./tracking-audit-brevo-options.mjs";
+
 const API_BASE = "https://api.brevo.com/v3";
 const apiKey = process.env.BREVO_API_KEY?.trim();
 
@@ -7,16 +9,6 @@ if (!apiKey) {
   console.error("BREVO_API_KEY is required. The value is never printed by this script.");
   process.exit(1);
 }
-
-const multipleChoiceChannels = [
-  "meta_ads",
-  "google_ads",
-  "microsoft_ads",
-  "linkedin_ads",
-  "tiktok_ads",
-  "other",
-  "none_currently",
-];
 
 const requiredAttributes = [
   { name: "WEBSITE_URL", type: "text" },
@@ -75,11 +67,12 @@ const conflicts = [];
 for (const definition of requiredAttributes) {
   const current = existing.get(definition.name);
   if (current) {
-    if (current.category !== "normal" || current.type !== definition.type) {
+    const validation = validateExistingAttribute(current, definition);
+    if (!validation.ok) {
       conflicts.push({
         name: definition.name,
-        expected: `normal/${definition.type}`,
-        actual: `${current.category || "unknown"}/${current.type || "unknown"}`,
+        expected: validation.expected,
+        actual: validation.actual,
       });
       continue;
     }
