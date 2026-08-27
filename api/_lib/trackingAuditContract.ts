@@ -116,6 +116,9 @@ export const normalizeAuditChannels = (value: unknown): string[] =>
 const unknownAuditChannels = (value: unknown): string[] =>
   rawAuditChannels(value).filter((item) => !normalizeAuditChannel(item));
 
+const hasMalformedAuditChannelEntries = (value: unknown): boolean =>
+  Array.isArray(value) && value.some((item) => typeof item !== "string");
+
 const CANONICAL_ONLY_FIELDS = [
   "industry",
   "role",
@@ -141,18 +144,19 @@ export const normalizeTrackingAuditApplication = (
   const company = asTrimmedString(data.company);
   const channels = normalizeAuditChannels(data.adPlatforms);
   const invalidChannels = unknownAuditChannels(data.adPlatforms);
+  const malformedChannels = hasMalformedAuditChannelEntries(data.adPlatforms);
   const canonical = hasCanonicalShape(data);
 
   if (!websiteUrl) return { ok: false, errors: ["websiteUrl"] };
 
   if (!canonical) {
     const legacySpend = asTrimmedString(data.monthlyAdSpend);
-    if (!legacySpend || channels.length === 0 || invalidChannels.length > 0) {
+    if (!legacySpend || channels.length === 0 || invalidChannels.length > 0 || malformedChannels) {
       return {
         ok: false,
         errors: [
           !legacySpend ? "monthlyAdSpend" : "",
-          channels.length === 0 || invalidChannels.length > 0 ? "adPlatforms" : "",
+          channels.length === 0 || invalidChannels.length > 0 || malformedChannels ? "adPlatforms" : "",
         ].filter(Boolean),
       };
     }
@@ -190,7 +194,7 @@ export const normalizeTrackingAuditApplication = (
     !ROLES.has(role) ? "role" : "",
     !DECISIONS.has(decisionInfluence) ? "decisionInfluence" : "",
     !SPEND_BANDS.has(monthlyAdSpendBand) ? "monthlyAdSpendBand" : "",
-    channels.length === 0 || invalidChannels.length > 0 ? "adPlatforms" : "",
+    channels.length === 0 || invalidChannels.length > 0 || malformedChannels ? "adPlatforms" : "",
     !MATURITY.has(trackingMaturity) ? "trackingMaturity" : "",
     !CONVERSIONS.has(primaryConversionType) ? "primaryConversionType" : "",
     !PROBLEMS.has(measurementProblem) ? "measurementProblem" : "",
