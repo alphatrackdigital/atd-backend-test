@@ -128,7 +128,9 @@ const CANONICAL_ONLY_FIELDS = [
 ] as const;
 
 const hasCanonicalShape = (data: Record<string, unknown>) =>
-  CANONICAL_ONLY_FIELDS.some((key) => asTrimmedString(data[key]).length > 0);
+  CANONICAL_ONLY_FIELDS.some((key) => asTrimmedString(data[key]).length > 0) ||
+  SPEND_BANDS.has(asTrimmedString(data.monthlyAdSpend)) ||
+  rawAuditChannels(data.adPlatforms).some((item) => CHANNELS.has(item));
 
 export const normalizeTrackingAuditApplication = (
   input: unknown,
