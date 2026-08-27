@@ -58,6 +58,52 @@ describe("Tracking Audit Brevo attribute option validation", () => {
     expect(result.actual).toContain("facebook_ads");
   });
 
+  it("rejects whitespace-corrupted options even when trimming would match", () => {
+    const result = validateExistingAttribute(
+      {
+        name: "AUDIT_PAID_CHANNELS",
+        category: "normal",
+        type: "multiple-choice",
+        multiCategoryOptions: multipleChoiceChannels.map((option) =>
+          option === "meta_ads" ? "meta_ads " : option
+        ),
+      },
+      definition,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.actual).toContain('\"meta_ads \"');
+  });
+
+  it("rejects duplicate options even when deduplication would match", () => {
+    const result = validateExistingAttribute(
+      {
+        name: "AUDIT_PAID_CHANNELS",
+        category: "normal",
+        type: "multiple-choice",
+        multiCategoryOptions: [...multipleChoiceChannels, "meta_ads"],
+      },
+      definition,
+    );
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects non-string option entries", () => {
+    const result = validateExistingAttribute(
+      {
+        name: "AUDIT_PAID_CHANNELS",
+        category: "normal",
+        type: "multiple-choice",
+        multiCategoryOptions: [...multipleChoiceChannels.slice(0, -1), 42],
+      },
+      definition,
+    );
+
+    expect(result.ok).toBe(false);
+  });
+
   it("still rejects category or type conflicts before option validation", () => {
     const result = validateExistingAttribute(
       {
