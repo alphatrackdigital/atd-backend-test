@@ -186,6 +186,18 @@ describe("Tracking Audit final review regressions", () => {
       expect(result.errors).toContain("adPlatforms");
     });
 
+    it(`${runtime} rejects unknown legacy channels instead of silently dropping them`, () => {
+      const result = normalizeAudit({
+        source: "tracking_audit_offer",
+        websiteUrl: "https://legacy-unknown.example.com",
+        monthlyAdSpend: "$1k - $5k / mo",
+        adPlatforms: "Google Ads, Facebook Ads",
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.errors).toContain("adPlatforms");
+    });
+
     it(`${runtime} still accepts genuinely legacy channel labels`, () => {
       const result = normalizeAudit({
         source: "tracking_audit_offer",
