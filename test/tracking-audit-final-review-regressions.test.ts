@@ -154,6 +154,27 @@ describe("Tracking Audit final review regressions", () => {
       expect(result.errors).toContain("urgency");
     });
 
+    it(`${runtime} treats supported spend aliases and canonical channel codes as canonical shape`, () => {
+      const result = normalizeAudit({
+        source: "tracking_audit_offer",
+        company: "Example Co",
+        websiteUrl: "https://example.com",
+        monthlyAdSpend: "6000_14999",
+        adPlatforms: ["meta_ads", "google_ads"],
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.errors).toEqual(expect.arrayContaining([
+        "industry",
+        "role",
+        "decisionInfluence",
+        "trackingMaturity",
+        "primaryConversionType",
+        "measurementProblem",
+        "urgency",
+      ]));
+    });
+
     it(`${runtime} rejects an unknown canonical channel even when another channel is valid`, () => {
       const payload = {
         ...canonicalAudit(`${runtime.toLowerCase()}-channel@example.com`),
