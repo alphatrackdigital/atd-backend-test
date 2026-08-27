@@ -34,7 +34,7 @@ Use this repository for:
 - MongoDB models and database helpers
 - Netlify and Vercel function routing
 
-Frontend website work belongs in `alphatrackdigital/atd-website`, not this
+Frontend website work belongs in `alphatrackdigital/alphatrackdigital`, not this
 repository.
 
 ## Tech Stack
@@ -112,14 +112,3 @@ alphatrackdigital-services
 Rename only after branch bindings, environment variables, webhooks, frontend
 endpoint overrides, and rollback references are inventoried. This project is the
 backend/API service, not the public marketing website.
-
-
-## Hybrid Codex workflow
-
-GitHub remains the backend synchronization and integration authority.
-
-```text
-feature branch → local/CI checks → push exact SHA → Codex Cloud task → Cloud PR into source branch → GitHub CI → deliberate Vercel runtime test if required → separate production promotion
-```
-
-Local and Cloud must not independently edit the same source branch at the same time. Codex Cloud may use a synthetic `work` branch and return changes through its native PR flow. Provider/runtime authorization is separate from code generation.
