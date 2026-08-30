@@ -374,7 +374,7 @@ const isReplaySafeAuditStepName = (step) =>
   step === "audit-mongo-persistence" || step === "audit-meta-capi";
 
 const getAuditDatabaseName = () =>
-  process.env.VITEST ? (getEnv("MONGODB_DATABASE") || "alphatrack") : "alphatrack_qa_tracking_audit";
+  process.env.VITEST ? (getEnv("MONGODB_DATABASE") || "alphatrack") : "alphatrack_tracking_audit_qa";
 
 const getAuditStepStoreOptions = () => ({
   mongoUri: getEnv("MONGODB_URI"),
