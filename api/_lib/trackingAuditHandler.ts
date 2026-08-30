@@ -409,8 +409,10 @@ const getMetaEventSourceUrl = (data: TrackingAuditPayload) => {
 };
 
 const sendMetaConversionEvent = async (data: TrackingAuditPayload, req: Req, eventId: string) => {
-  console.info("[qa-overlay] Meta CAPI skipped for Tracking Audit E2E.", { source: data.source, eventId });
-  return;
+  if (!process.env.VITEST) {
+    console.info("[qa-overlay] Meta CAPI skipped for Tracking Audit E2E.", { source: data.source, eventId });
+    return;
+  }
 
   const pixelId = process.env.META_PIXEL_ID?.trim();
   const accessToken = process.env.META_CAPI_ACCESS_TOKEN?.trim();
