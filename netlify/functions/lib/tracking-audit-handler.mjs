@@ -372,9 +372,12 @@ const isDefiniteAuditStepFailure = (error) => {
 const isReplaySafeAuditStepName = (step) =>
   step === "audit-mongo-persistence" || step === "audit-meta-capi";
 
+const getAuditDatabaseName = () =>
+  process.env.VITEST ? (getEnv("MONGODB_DATABASE") || "alphatrack") : "alphatrack_qa_tracking_audit";
+
 const getAuditStepStoreOptions = () => ({
   mongoUri: getEnv("MONGODB_URI"),
-  databaseName: getEnv("MONGODB_DATABASE") || "alphatrack",
+  databaseName: getAuditDatabaseName(),
 });
 
 const runIdempotentAuditStep = async (dedupeKey, step, action, errorLabel) => {
@@ -417,7 +420,7 @@ const persistTrackingAudit = async (dedupeKey, data, audit, request) => {
     primaryConversionType: audit.primaryConversionType,
     measurementProblem: audit.measurementProblem,
     urgency: audit.urgency,
-  }, getClientIp(request), getEnv("MONGODB_URI"), getEnv("MONGODB_DATABASE") || "alphatrack");
+  }, getClientIp(request), getEnv("MONGODB_URI"), getAuditDatabaseName());
   if (!saved) throw new Error("MongoDB Tracking Audit persistence is not configured.");
 };
 
