@@ -14,6 +14,8 @@ import { auditLifecycleAttributes, normalizeTrackingAuditApplication } from "./t
 
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 8;
+const QA_OVERLAY_ORIGIN = "https://atd-website-qa.alphatrackdigital.workers.dev";
+const QA_PROXY_MARKER = "tracking-audit-e2e";
 const buckets = globalThis.__atdTrackingAuditRequestBuckets ?? new Map();
 globalThis.__atdTrackingAuditRequestBuckets = buckets;
 
@@ -33,13 +35,21 @@ const getCorsHeaders = (request) => {
   const origin = request.headers.get("origin");
   const headers = {
     "access-control-allow-methods": "POST, OPTIONS",
-    "access-control-allow-headers": "Content-Type, Authorization",
+    "access-control-allow-headers": "Content-Type, Authorization, X-ATD-QA-Proxy",
   };
   if (isAllowedBrowserOrigin(origin, getEnv("CONTEXT"), getEnv("ALLOWED_ORIGINS"))) {
     headers["access-control-allow-origin"] = origin;
     headers.vary = "Origin";
   }
   return headers;
+};
+
+const isQaOverlayRequestAllowed = (request) => {
+  if (process.env.VITEST) return true;
+  return (
+    request.headers.get("x-atd-qa-proxy") === QA_PROXY_MARKER &&
+    request.headers.get("origin") === QA_OVERLAY_ORIGIN
+  );
 };
 
 const getClientIp = (request) =>
@@ -455,6 +465,9 @@ const completeAuditSideEffects = async (dedupeKey, data, audit, contactId, apiKe
 
 export default async (request) => {
   const corsHeaders = getCorsHeaders(request);
+  if (!isQaOverlayRequestAllowed(request)) {
+    return json({ ok: false, message: "QA route not allowed." }, { status: 403, headers: corsHeaders });
+  }
   if (hasDisallowedBrowserOrigin(request, getEnv("CONTEXT"), getEnv("ALLOWED_ORIGINS"))) {
     return json({ ok: false, message: "Origin not allowed." }, { status: 403, headers: corsHeaders });
   }
