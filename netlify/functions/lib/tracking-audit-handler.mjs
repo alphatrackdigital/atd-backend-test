@@ -16,6 +16,7 @@ const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 8;
 const QA_OVERLAY_ORIGIN = "https://atd-website-qa.alphatrackdigital.workers.dev";
 const QA_PROXY_MARKER = "tracking-audit-e2e";
+// QA overlay deploys are refreshed deliberately after preview-only environment changes.
 const buckets = globalThis.__atdTrackingAuditRequestBuckets ?? new Map();
 globalThis.__atdTrackingAuditRequestBuckets = buckets;
 
