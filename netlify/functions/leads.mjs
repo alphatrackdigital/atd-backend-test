@@ -32,7 +32,7 @@ const qaJson = (payload, status = 200) =>
   });
 
 const runDependencyProbe = async () => {
-  const databaseName = "alphatrack_qa_tracking_audit";
+  const databaseName = "alphatrack_tracking_audit_qa";
   const mongoUri = getEnv("MONGODB_URI")?.trim();
   const brevoApiKey = getEnv("BREVO_API_KEY")?.trim();
   const metaConfigured = Boolean(getEnv("META_CAPI_ACCESS_TOKEN")?.trim());
