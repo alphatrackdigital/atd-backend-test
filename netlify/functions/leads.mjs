@@ -31,7 +31,7 @@ const qaJson = (payload, status = 200) =>
     headers: { "content-type": "application/json", "cache-control": "no-store" },
   });
 
-const UAT_TEST_EMAIL = "alphatrackdigital+tracking-audit-uat-20260831-01@gmail.com";
+const UAT_TEST_EMAIL = "alphatrackdigital+tracking-audit-dedupe-uat-20260831@gmail.com";
 
 const getBrevoJson = async (url, apiKey) => {
   const response = await fetch(url, {
