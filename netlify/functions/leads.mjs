@@ -3,6 +3,7 @@ import trackingAuditHandler from "./lib/tracking-audit-handler.mjs";
 
 const QA_OVERLAY_ORIGIN = "https://atd-website-qa.alphatrackdigital.workers.dev";
 const QA_PROXY_MARKER = "tracking-audit-e2e";
+// Controlled UAT window closed; keep preview access protected outside explicit QA sessions.
 
 const isQaOverlayRequestAllowed = (request) => {
   if (process.env.VITEST) return true;
