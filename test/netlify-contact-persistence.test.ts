@@ -14,6 +14,7 @@ describe("Netlify lead persistence mapping", () => {
       monthlyBudget: "3",
     }, "203.0.113.10")).toEqual({
       source: "contact_form",
+      submissionKey: "",
       firstName: "Ada",
       lastName: "Lovelace",
       email: "ada@example.com",

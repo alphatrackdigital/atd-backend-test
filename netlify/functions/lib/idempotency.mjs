@@ -1,10 +1,37 @@
 import { createHash } from "node:crypto";
+import mongoose from "mongoose";
+import { normalizeAuditChannels } from "./tracking-audit-contract.mjs";
 
 const memoryStore = globalThis.__atdConversionIdempotency ?? new Map();
 globalThis.__atdConversionIdempotency = memoryStore;
+const auditStepMemoryClaims = globalThis.__atdAuditStepClaims ?? new Map();
+globalThis.__atdAuditStepClaims = auditStepMemoryClaims;
+const metaEventReservationMemory = globalThis.__atdTrackingAuditMetaEventReservations ?? new Map();
+globalThis.__atdTrackingAuditMetaEventReservations = metaEventReservationMemory;
 
 const STORE_NAME = "atd-conversion-idempotency";
 let testDurableStore;
+
+const AuditStepClaimSchema = new mongoose.Schema({
+  key: { type: String, required: true, unique: true },
+  status: { type: String, enum: ["in_progress", "completed"], required: true },
+  leaseUntil: { type: Date, default: null },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
+  expiresAt: { type: Date, required: true, expires: 0 },
+});
+
+const TrackingAuditMetaEventReservationSchema = new mongoose.Schema({
+  key: { type: String, required: true, unique: true },
+  eventId: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now },
+  expiresAt: { type: Date, required: true, expires: 0 },
+});
+
+const AuditStepClaim = mongoose.models.AuditStepClaim || mongoose.model("AuditStepClaim", AuditStepClaimSchema);
+const TrackingAuditMetaEventReservation =
+  mongoose.models.TrackingAuditMetaEventReservation ||
+  mongoose.model("TrackingAuditMetaEventReservation", TrackingAuditMetaEventReservationSchema);
 
 export class DurableIdempotencyError extends Error {
   constructor(message = "Durable idempotency storage is unavailable.") {
@@ -17,12 +44,37 @@ export const normalizeEmail = (value) => String(value || "").trim().toLowerCase(
 
 const normalizeString = (value) => String(value || "").trim().toLowerCase();
 
+const normalizeAuditChannelsForFingerprint = (value) =>
+  normalizeAuditChannels(value).slice().sort().join(",");
+
 export const hashValue = (value) =>
   createHash("sha256").update(String(value)).digest("hex").slice(0, 32);
 
 const dayStamp = (date = new Date()) => date.toISOString().slice(0, 10);
 
 const safeKey = (parts) => parts.map((part) => String(part).replace(/[^a-zA-Z0-9._-]/g, "-")).join("/");
+
+const trackingAuditApplicationFingerprint = (payload) =>
+  [
+    normalizeEmail(payload?.email),
+    normalizeString(payload?.websiteUrl),
+    normalizeString(payload?.firstName),
+    normalizeString(payload?.lastName),
+    normalizeString(payload?.company),
+    normalizeString(payload?.industry),
+    normalizeString(payload?.role),
+    normalizeString(payload?.decisionInfluence),
+    normalizeString(payload?.monthlyAdSpendBand || payload?.monthlyAdSpend),
+    normalizeAuditChannelsForFingerprint(payload?.adPlatforms),
+    normalizeString(payload?.trackingMaturity),
+    normalizeString(payload?.primaryConversionType),
+    normalizeString(payload?.measurementProblem),
+    normalizeString(payload?.urgency),
+    payload?.optIn === true ? "opted_in" : "not_opted_in",
+  ].join("|");
+
+const isReplaySafeAuditStep = (key) =>
+  key.endsWith("/audit-mongo-persistence") || key.endsWith("/audit-meta-capi");
 
 const getBlobStore = async () => {
   if (process.env.VITEST) return testDurableStore || null;
@@ -33,6 +85,63 @@ const getBlobStore = async () => {
   } catch {
     return null;
   }
+};
+
+const connectAuditStepStore = async (mongoUri, databaseName = "alphatrack") => {
+  if (!mongoUri) throw new DurableIdempotencyError("Durable Tracking Audit step claims require MONGODB_URI.");
+  if (mongoose.connection.readyState === 0) {
+    await mongoose.connect(mongoUri, { dbName: databaseName });
+  }
+};
+
+const isDuplicateKeyError = (error) => Number(error?.code) === 11000;
+
+export const reserveTrackingAuditMetaEventId = async (
+  key,
+  proposedEventId,
+  { mongoUri, databaseName = "alphatrack" } = {},
+) => {
+  const normalizedKey = String(key || "").trim();
+  const normalizedEventId = String(proposedEventId || "").trim() || normalizedKey;
+  if (!normalizedKey || !normalizedEventId) {
+    throw new DurableIdempotencyError("A Tracking Audit dedupe key and Meta event ID are required.");
+  }
+
+  const memoryReservation = metaEventReservationMemory.get(normalizedKey);
+  if (memoryReservation) return memoryReservation;
+
+  if (process.env.VITEST) {
+    metaEventReservationMemory.set(normalizedKey, normalizedEventId);
+    return normalizedEventId;
+  }
+
+  await connectAuditStepStore(mongoUri, databaseName);
+  const now = new Date();
+  const candidate = {
+    key: normalizedKey,
+    eventId: normalizedEventId,
+    createdAt: now,
+    expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+  };
+
+  let reservation;
+  try {
+    reservation = await TrackingAuditMetaEventReservation.findOneAndUpdate(
+      { key: normalizedKey },
+      { $setOnInsert: candidate },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    ).lean();
+  } catch (error) {
+    if (!isDuplicateKeyError(error)) throw error;
+    reservation = await TrackingAuditMetaEventReservation.findOne({ key: normalizedKey }).lean();
+  }
+
+  const reservedEventId = String(reservation?.eventId || "").trim();
+  if (!reservedEventId) {
+    throw new DurableIdempotencyError("Unable to reserve a stable Tracking Audit Meta event ID.");
+  }
+  metaEventReservationMemory.set(normalizedKey, reservedEventId);
+  return reservedEventId;
 };
 
 export const getDurableIdempotencyRecord = async (key) => {
@@ -110,9 +219,99 @@ export const markIdempotencyKey = async (key, payload = {}) => {
   }
 };
 
+export const claimAuditStep = async (
+  key,
+  { mongoUri, databaseName = "alphatrack", leaseMs = 60_000, allowExpiredReclaim } = {},
+) => {
+  if (!key) return false;
+  const reclaimExpired = allowExpiredReclaim ?? isReplaySafeAuditStep(key);
+  const nowMs = Date.now();
+
+  const memoryClaim = auditStepMemoryClaims.get(key);
+  if (memoryClaim?.status === "completed") return false;
+  if (memoryClaim?.status === "in_progress") {
+    if (!reclaimExpired || (memoryClaim.leaseUntil || 0) > nowMs) return false;
+  }
+
+  if (process.env.VITEST) {
+    auditStepMemoryClaims.set(key, { status: "in_progress", leaseUntil: nowMs + leaseMs });
+    return true;
+  }
+
+  await connectAuditStepStore(mongoUri, databaseName);
+  const now = new Date(nowMs);
+  const leaseUntil = new Date(nowMs + leaseMs);
+  const expiresAt = new Date(nowMs + 7 * 24 * 60 * 60 * 1000);
+
+  try {
+    await AuditStepClaim.create({ key, status: "in_progress", leaseUntil, createdAt: now, updatedAt: now, expiresAt });
+    auditStepMemoryClaims.set(key, { status: "in_progress", leaseUntil: leaseUntil.getTime() });
+    return true;
+  } catch (error) {
+    if (!isDuplicateKeyError(error)) throw error;
+  }
+
+  if (!reclaimExpired) return false;
+
+  const reclaimed = await AuditStepClaim.findOneAndUpdate(
+    { key, status: "in_progress", leaseUntil: { $lte: now } },
+    { $set: { leaseUntil, updatedAt: now, expiresAt } },
+    { new: true },
+  ).lean();
+  if (reclaimed) {
+    auditStepMemoryClaims.set(key, { status: "in_progress", leaseUntil: leaseUntil.getTime() });
+  }
+  return Boolean(reclaimed);
+};
+
+export const completeAuditStep = async (key, { mongoUri, databaseName = "alphatrack" } = {}) => {
+  if (!key) return;
+  if (process.env.VITEST) {
+    auditStepMemoryClaims.set(key, { status: "completed" });
+    return;
+  }
+
+  try {
+    await connectAuditStepStore(mongoUri, databaseName);
+    const now = new Date();
+    await AuditStepClaim.updateOne(
+      { key, status: "in_progress" },
+      {
+        $set: {
+          status: "completed",
+          leaseUntil: null,
+          updatedAt: now,
+          expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+        },
+      },
+    );
+    auditStepMemoryClaims.set(key, { status: "completed" });
+  } catch (error) {
+    console.error("Tracking Audit completion marker persistence failed; preserving the durable in-progress claim.", {
+      key,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+};
+
+export const releaseAuditStep = async (key, { mongoUri, databaseName = "alphatrack" } = {}) => {
+  if (!key) return;
+  if (process.env.VITEST) {
+    const existing = auditStepMemoryClaims.get(key);
+    if (existing?.status === "in_progress") auditStepMemoryClaims.delete(key);
+    return;
+  }
+
+  await connectAuditStepStore(mongoUri, databaseName);
+  await AuditStepClaim.deleteOne({ key, status: "in_progress" });
+  auditStepMemoryClaims.delete(key);
+};
+
 export const resetIdempotencyForTests = () => {
   if (process.env.VITEST) {
     memoryStore.clear();
+    auditStepMemoryClaims.clear();
+    metaEventReservationMemory.clear();
     testDurableStore = undefined;
   }
 };
@@ -131,8 +330,12 @@ export const buildLeadDedupeKey = (payload) => {
   }
 
   if (source === "tracking_audit_offer") {
-    const website = normalizeString(payload?.websiteUrl);
-    return safeKey(["lead", source, dayStamp(), hashValue(`${email}|${website}`)]);
+    return safeKey([
+      "lead",
+      source,
+      dayStamp(),
+      hashValue(trackingAuditApplicationFingerprint(payload)),
+    ]);
   }
 
   return safeKey(["lead", source, dayStamp(), hashValue(email)]);
