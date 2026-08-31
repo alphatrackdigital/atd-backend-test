@@ -157,6 +157,44 @@ const runUatRecordProbe = async () => {
   });
 };
 
+const runUatCleanup = async () => {
+  const apiKey = getEnv("BREVO_API_KEY")?.trim();
+  if (!apiKey) return qaJson({ ok: false, message: "Brevo is not configured." }, 503);
+
+  const taskIds = [
+    "6a94c31858cc954e34311a77",
+    "6a94c4aa58cc954e34311b26",
+  ];
+  const emails = [
+    "alphatrackdigital+tracking-audit-uat-20260831-01@gmail.com",
+    "alphatrackdigital+tracking-audit-dedupe-uat-20260831@gmail.com",
+  ];
+
+  const deleteFixed = async (url) => {
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: { "api-key": apiKey, accept: "application/json" },
+    });
+    return { ok: response.ok || response.status === 404, status: response.status };
+  };
+
+  const taskResults = [];
+  for (const id of taskIds) {
+    taskResults.push({ id, ...(await deleteFixed(`https://api.brevo.com/v3/crm/tasks/${id}`)) });
+  }
+
+  const contactResults = [];
+  for (const email of emails) {
+    contactResults.push({
+      email,
+      ...(await deleteFixed(`https://api.brevo.com/v3/contacts/${encodeURIComponent(email)}`)),
+    });
+  }
+
+  const ok = [...taskResults, ...contactResults].every((result) => result.ok);
+  return qaJson({ ok, taskResults, contactResults }, ok ? 200 : 502);
+};
+
 const runDependencyProbe = async () => {
   const databaseName = "alphatrack_tracking_audit_qa";
   const mongoUri = getEnv("MONGODB_URI")?.trim();
@@ -210,6 +248,9 @@ export default async (request) => {
   }
   if (request.method === "GET" && url.searchParams.get("atd_qa_probe") === "uat_records") {
     return runUatRecordProbe();
+  }
+  if (request.method === "POST" && url.searchParams.get("atd_qa_cleanup") === "uat_records") {
+    return runUatCleanup();
   }
 
   let source;
