@@ -51,6 +51,22 @@ const request = async (path, options = {}) => {
 const listResponse = await request("/contacts/attributes", { method: "GET" });
 if (!listResponse.ok) {
   console.error(`Unable to list Brevo contact attributes (HTTP ${listResponse.status}).`);
+  try {
+    const mongoUri = process.env.MONGODB_URI?.trim();
+    if (mongoUri) {
+      await mongoose.connect(mongoUri, { dbName: process.env.MONGODB_DATABASE || "alphatrack" });
+      await mongoose.connection.db.collection("qa_diagnostics").insertOne({
+        kind: "tracking_audit_brevo_api_failure",
+        phase: "list_attributes",
+        status: listResponse.status,
+        createdAt: new Date(),
+        source: "netlify-production-fail-closed-build",
+      });
+      await mongoose.disconnect();
+    }
+  } catch {
+    console.error("Mongo diagnostic write failed safely.");
+  }
   process.exit(1);
 }
 
@@ -98,6 +114,23 @@ for (const definition of requiredAttributes) {
     console.error(
       `Failed to create ${definition.name} (HTTP ${createResponse.status}). ${safeError.slice(0, 180)}`,
     );
+    try {
+      const mongoUri = process.env.MONGODB_URI?.trim();
+      if (mongoUri) {
+        await mongoose.connect(mongoUri, { dbName: process.env.MONGODB_DATABASE || "alphatrack" });
+        await mongoose.connection.db.collection("qa_diagnostics").insertOne({
+          kind: "tracking_audit_brevo_api_failure",
+          phase: "create_attribute",
+          attribute: definition.name,
+          status: createResponse.status,
+          createdAt: new Date(),
+          source: "netlify-production-fail-closed-build",
+        });
+        await mongoose.disconnect();
+      }
+    } catch {
+      console.error("Mongo diagnostic write failed safely.");
+    }
     process.exit(1);
   }
 
