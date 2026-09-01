@@ -163,3 +163,6 @@ console.log(`Brevo Tracking Audit attributes verified: ${verified.length}`);
 console.log(`Brevo Tracking Audit attributes created: ${created.length}`);
 if (created.length) console.log(`Created: ${created.join(", ")}`);
 console.log("No existing attribute types were modified. BREVO_API_KEY was not printed.");
+
+// Diagnostic branch: never activate even if no conflicts remain.
+process.exit(90);
