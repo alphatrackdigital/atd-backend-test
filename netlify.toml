@@ -1,4 +1,5 @@
 [build]
+  command = "node scripts/configure-tracking-audit-brevo.mjs"
   functions = "netlify/functions"
   publish = "public"
 
