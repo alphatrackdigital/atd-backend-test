@@ -16,9 +16,9 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "ed95f527fdf5a9bc24a4a764afeaab14da8a7ebe"
       - name: Package exact source
         run: |
-          tar --exclude=.git -czf atd-backend-ed95f527fdf5a9bc24a4a764afeaab14da8a7ebe.tar.gz .
+          tar --exclude=.git -czf /tmp/atd-backend-ed95f527fdf5a9bc24a4a764afeaab14da8a7ebe.tar.gz .
       - uses: actions/upload-artifact@v4
         with:
           name: atd-backend-ed95f527fdf5a9bc24a4a764afeaab14da8a7ebe
-          path: atd-backend-ed95f527fdf5a9bc24a4a764afeaab14da8a7ebe.tar.gz
+          path: /tmp/atd-backend-ed95f527fdf5a9bc24a4a764afeaab14da8a7ebe.tar.gz
           retention-days: 1
