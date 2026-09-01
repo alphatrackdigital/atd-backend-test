@@ -108,6 +108,36 @@ if (conflicts.length) {
   for (const conflict of conflicts) {
     console.error(`- ${conflict.name}: expected ${conflict.expected}; found ${conflict.actual}`);
   }
+
+  // QA-only diagnostic: email conflict metadata to ATD, then fail closed.
+  // No contact, CRM, Mongo, Meta or production runtime write is performed.
+  try {
+    const rows = conflicts.map((conflict) =>
+      `${conflict.name}: expected ${conflict.expected}; found ${conflict.actual}`
+    );
+    const response = await request("/smtp/email", {
+      method: "POST",
+      body: JSON.stringify({
+        sender: { name: "AlphaTrack Digital", email: "audit@alphatrack.digital" },
+        to: [{ email: "alphatrackdigital@gmail.com" }],
+        subject: "ATD QA: Tracking Audit Brevo schema conflicts",
+        textContent: [
+          "Tracking Audit production Brevo schema diagnostic.",
+          "",
+          ...rows,
+          "",
+          "This diagnostic build failed closed and did not activate a new backend deploy."
+        ].join("\\n"),
+        tags: ["tracking_audit_schema_qa"]
+      }),
+    });
+    if (!response.ok) {
+      console.error(`Diagnostic email failed with HTTP ${response.status}.`);
+    }
+  } catch (error) {
+    console.error("Diagnostic email failed safely.");
+  }
+
   process.exit(2);
 }
 
