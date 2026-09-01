@@ -156,7 +156,7 @@ if (conflicts.length) {
     console.error("Diagnostic email failed safely.");
   }
 
-  process.exit(2);
+  process.exit(50 + Math.min(conflicts.length, 150));
 }
 
 console.log(`Brevo Tracking Audit attributes verified: ${verified.length}`);
