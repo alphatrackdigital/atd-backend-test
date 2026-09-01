@@ -1,5 +1,5 @@
 [build]
-  command = "node scripts/configure-tracking-audit-brevo.mjs"
+  command = "if [ \"$CONTEXT\" = \"production\" ]; then node scripts/configure-tracking-audit-brevo.mjs; else echo 'Skipping production Brevo schema verification outside production context.'; fi"
   functions = "netlify/functions"
   publish = "public"
 
