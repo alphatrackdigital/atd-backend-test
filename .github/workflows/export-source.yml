@@ -1,0 +1,24 @@
+name: Export backend source
+on:
+  push:
+    branches:
+      - qa/netlify-production-deploy-source
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ed95f527fdf5a9bc24a4a764afeaab14da8a7ebe
+      - name: Verify source SHA
+        run: test "$(git rev-parse HEAD)" = "ed95f527fdf5a9bc24a4a764afeaab14da8a7ebe"
+      - name: Package exact source
+        run: |
+          tar --exclude=.git -czf atd-backend-ed95f527fdf5a9bc24a4a764afeaab14da8a7ebe.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: atd-backend-ed95f527fdf5a9bc24a4a764afeaab14da8a7ebe
+          path: atd-backend-ed95f527fdf5a9bc24a4a764afeaab14da8a7ebe.tar.gz
+          retention-days: 1
