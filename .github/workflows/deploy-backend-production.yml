@@ -1,0 +1,40 @@
+name: Deploy backend production to Netlify
+on:
+  push:
+    branches:
+      - qa/deploy-backend-production-netlify
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NETLIFY_SITE_ID: 0ff8ae6e-263e-43bd-9917-cc2a64c2a62f
+      NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+    steps:
+      - name: Require existing Netlify credential
+        run: |
+          if [ -z "$NETLIFY_AUTH_TOKEN" ]; then
+            echo "NETLIFY_AUTH_TOKEN is not configured in GitHub Actions."
+            exit 2
+          fi
+      - name: Checkout exact production backend SHA
+        uses: actions/checkout@v4
+        with:
+          ref: 3844608ce4b67dc72f0f687c0c002e626212fb90
+      - name: Verify exact source
+        run: test "$(git rev-parse HEAD)" = "3844608ce4b67dc72f0f687c0c002e626212fb90"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Deploy exact backend main to Netlify production
+        run: |
+          npx -y netlify-cli@latest deploy \
+            --build \
+            --prod \
+            --context production \
+            --site "$NETLIFY_SITE_ID" \
+            --auth "$NETLIFY_AUTH_TOKEN" \
+            --message "Deploy backend main 3844608ce4b67dc72f0f687c0c002e626212fb90"
