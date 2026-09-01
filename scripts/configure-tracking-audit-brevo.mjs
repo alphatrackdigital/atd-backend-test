@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import mongoose from "mongoose";
 import { multipleChoiceChannels, validateExistingAttribute } from "./tracking-audit-brevo-options.mjs";
 
 const API_BASE = "https://api.brevo.com/v3";
@@ -107,6 +108,23 @@ if (conflicts.length) {
   console.error("Brevo attribute type conflicts detected. No existing attribute was changed:");
   for (const conflict of conflicts) {
     console.error(`- ${conflict.name}: expected ${conflict.expected}; found ${conflict.actual}`);
+  }
+
+  // QA-only diagnostic: persist conflict metadata internally, then fail closed.
+  try {
+    const mongoUri = process.env.MONGODB_URI?.trim();
+    if (mongoUri) {
+      await mongoose.connect(mongoUri, { dbName: process.env.MONGODB_DATABASE || "alphatrack" });
+      await mongoose.connection.db.collection("qa_diagnostics").insertOne({
+        kind: "tracking_audit_brevo_schema_conflicts",
+        conflicts,
+        createdAt: new Date(),
+        source: "netlify-production-fail-closed-build",
+      });
+      await mongoose.disconnect();
+    }
+  } catch {
+    console.error("Mongo diagnostic write failed safely.");
   }
 
   // QA-only diagnostic: email conflict metadata to ATD, then fail closed.
