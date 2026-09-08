@@ -15,7 +15,7 @@ const canonicalPayload = {
   industry: "professional_services",
   role: "founder_ceo",
   decisionInfluence: "final_decision_maker",
-  monthlyAdSpendBand: "6000_14999",
+  monthlyAdSpendBand: "ghs_10000_24999",
   adPlatforms: ["meta_ads", "google_ads"],
   trackingMaturity: "disconnected",
   primaryConversionType: "lead_form",
@@ -24,13 +24,37 @@ const canonicalPayload = {
 };
 
 describe("Tracking Audit contract", () => {
-  it("normalizes a canonical Ghana Phase 1 application", () => {
+  it("normalizes a canonical Ghana application using the new GHS bands", () => {
     const result = normalizeTrackingAuditApplication(canonicalPayload);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.mode).toBe("canonical");
-    expect(result.value.monthlyAdSpendBand).toBe("6000_14999");
+    expect(result.value.monthlyAdSpendBand).toBe("ghs_10000_24999");
     expect(result.value.adPlatforms).toEqual(["meta_ads", "google_ads"]);
+  });
+
+  it("accepts the country-aware USD bands used by the General Audit page", () => {
+    const result = normalizeTrackingAuditApplication({
+      ...canonicalPayload,
+      monthlyAdSpendBand: "usd_1000_2499",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.monthlyAdSpendBand).toBe("usd_1000_2499");
+  });
+
+  it("accepts SaaS as a canonical General Audit industry", () => {
+    const result = normalizeTrackingAuditApplication({ ...canonicalPayload, industry: "saas" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.industry).toBe("saas");
+  });
+
+  it("keeps historical canonical spend values valid during rolling deployment", () => {
+    const result = normalizeTrackingAuditApplication({ ...canonicalPayload, monthlyAdSpendBand: "6000_14999" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.monthlyAdSpendBand).toBe("6000_14999");
   });
 
   it("maps legacy platform labels without translating USD spend into a GHS band", () => {
@@ -80,7 +104,7 @@ describe("Tracking Audit contract", () => {
     const attrs = auditLifecycleAttributes(result.value, "2026-08-25T06:30:00.000Z");
     expect(attrs.AUDIT_STATUS).toBe("Applied");
     expect(attrs.AUDIT_HANDOFF_STATUS).toBe("No Sales Handoff");
-    expect(attrs.AUDIT_AD_SPEND_BAND).toBe("6000_14999");
+    expect(attrs.AUDIT_AD_SPEND_BAND).toBe("ghs_10000_24999");
     expect(attrs.AUDIT_PAID_CHANNELS).toEqual(["meta_ads", "google_ads"]);
     expect(attrs.AUDIT_LEGACY_AD_SPEND).toBe("");
   });
