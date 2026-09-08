@@ -43,6 +43,11 @@
   status = 200
 
 [[redirects]]
+  from = "/api/visitor-country"
+  to = "/.netlify/functions/visitor-country"
+  status = 200
+
+[[redirects]]
   from = "/api/contacts/admin/read/:id"
   to = "/.netlify/functions/contacts-admin"
   status = 200
