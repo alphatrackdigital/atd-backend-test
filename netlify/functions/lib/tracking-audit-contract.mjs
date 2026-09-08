@@ -1,7 +1,7 @@
-export const AUDIT_INDUSTRIES=["professional_services","education_training","ecommerce_dtc","real_estate","other"];
+export const AUDIT_INDUSTRIES=["professional_services","education_training","ecommerce_dtc","real_estate","saas","other"];
 export const AUDIT_ROLES=["founder_ceo","marketing_lead","growth_performance","operations_commercial","other"];
 export const AUDIT_DECISION_INFLUENCE=["final_decision_maker","strong_influence","contributor","researching"];
-export const AUDIT_AD_SPEND_BANDS=["paused_or_not_spending","under_1500","1500_2999","3000_5999","6000_14999","15000_plus","not_sure"];
+export const AUDIT_AD_SPEND_BANDS=["paused_or_not_spending","ghs_5000_9999","ghs_10000_24999","ghs_25000_49999","ghs_50000_plus","usd_500_999","usd_1000_2499","usd_2500_4999","usd_5000_plus","not_sure","under_1500","1500_2999","3000_5999","6000_14999","15000_plus"];
 export const AUDIT_PAID_CHANNELS=["meta_ads","google_ads","microsoft_ads","linkedin_ads","tiktok_ads","other","none_currently"];
 export const AUDIT_TRACKING_MATURITY=["not_sure","basic","partial","disconnected","confident"];
 export const AUDIT_PRIMARY_CONVERSIONS=["lead_form","booked_call_appointment","whatsapp_message","ecommerce_purchase","application_enrolment","other"];
