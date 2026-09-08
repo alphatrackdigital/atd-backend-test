@@ -3,6 +3,7 @@ export const AUDIT_INDUSTRIES = [
   "education_training",
   "ecommerce_dtc",
   "real_estate",
+  "saas",
   "other",
 ] as const;
 
@@ -23,12 +24,21 @@ export const AUDIT_DECISION_INFLUENCE = [
 
 export const AUDIT_AD_SPEND_BANDS = [
   "paused_or_not_spending",
+  "ghs_5000_9999",
+  "ghs_10000_24999",
+  "ghs_25000_49999",
+  "ghs_50000_plus",
+  "usd_500_999",
+  "usd_1000_2499",
+  "usd_2500_4999",
+  "usd_5000_plus",
+  "not_sure",
+  // Historical values remain accepted for rolling compatibility with older clients.
   "under_1500",
   "1500_2999",
   "3000_5999",
   "6000_14999",
   "15000_plus",
-  "not_sure",
 ] as const;
 
 export const AUDIT_PAID_CHANNELS = [
