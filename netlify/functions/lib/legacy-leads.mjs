@@ -332,12 +332,7 @@ const leadNotificationConfig = {
     subject: "New tracking audit request",
     label: "Tracking audit request",
   },
-  newsletter: {
-    senderEmail: "marketing@alphatrack.digital",
-    recipients: ["marketing@alphatrack.digital"],
-    subject: "New newsletter signup",
-    label: "Newsletter signup",
-  },
+  // Newsletter subscriptions are stored in Brevo without per-signup internal emails.
 };
 
 const crmConfig = {
