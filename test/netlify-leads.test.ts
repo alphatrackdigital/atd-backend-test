@@ -48,12 +48,18 @@ const legacyAudit = {
   adPlatforms: "Google Ads, Meta Ads",
 };
 
-const installProviderFetch = (options: { failReceiptOnce?: boolean; failTaskOnce?: boolean } = {}) => {
+const installProviderFetch = (options: { failReceiptOnce?: boolean; failTaskOnce?: boolean; turnstileResult?: Record<string, unknown>; turnstileNetworkError?: boolean } = {}) => {
   let receiptAttempts = 0;
   let taskAttempts = 0;
   const fetchMock = vi.fn(async (url: string | URL | Request, init: RequestInit = {}) => {
     const target = String(url);
     const method = String(init.method || "GET").toUpperCase();
+    if (target === "https://challenges.cloudflare.com/turnstile/v0/siteverify") {
+      if (options.turnstileNetworkError) throw new Error("verification offline");
+      return new Response(JSON.stringify(options.turnstileResult ?? {
+        success: true, hostname: "alphatrack.digital", action: "newsletter_signup",
+      }), { status: 200 });
+    }
     if (target.startsWith("https://api.brevo.com/v3/contacts/") && method === "GET") {
       return new Response("", { status: 404 });
     }
@@ -115,6 +121,9 @@ describe("Netlify leads application-first Tracking Audit flow", () => {
       "BREVO_NEWSLETTER_LIST_ID",
       "BREVO_DOI_TEMPLATE_ID",
       "BREVO_DOI_REDIRECT_URL",
+      "TURNSTILE_NEWSLETTER_REQUIRED",
+      "TURNSTILE_SECRET_KEY",
+      "TURNSTILE_ALLOWED_HOSTNAMES",
       "META_PIXEL_ID",
       "META_CAPI_ACCESS_TOKEN",
       "META_GRAPH_API_VERSION",
@@ -279,7 +288,7 @@ describe("Netlify leads application-first Tracking Audit flow", () => {
     expect(callsFor(fetchMock, "/crm/tasks")).toHaveLength(1);
   });
 
-  it("preserves newsletter DOI fallback to direct capture", async () => {
+  it("never silently subscribes when an enabled Brevo DOI template is invalid", async () => {
     process.env.BREVO_DOI_TEMPLATE_ID = "42";
     process.env.BREVO_DOI_REDIRECT_URL = "https://alphatrack.digital/newsletter/confirmed";
     const fetchMock = installProviderFetch();
@@ -290,11 +299,77 @@ describe("Netlify leads application-first Tracking Audit flow", () => {
       email: "reader@example.com",
       optIn: true,
     }));
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ ok: true, pendingConfirmation: false, duplicate: false });
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({ ok: false });
     expect(callsFor(fetchMock, "/contacts/doubleOptinConfirmation")).toHaveLength(1);
+    expect(callsFor(fetchMock, "/v3/contacts").filter(([, init]) => String((init as RequestInit).method).toUpperCase() === "POST")).toHaveLength(1);
+    expect(callsFor(fetchMock, "https://api.brevo.com/v3/contacts").filter(([url]) => String(url) === "https://api.brevo.com/v3/contacts")).toHaveLength(0);
     expect(callsFor(fetchMock, "/crm/deals")).toHaveLength(0);
-    // Successful newsletter capture must not send an internal email per signup.
     expect(smtpBodies(fetchMock)).toHaveLength(0);
   });
+  it("fails closed if newsletter challenge enforcement has no server secret", async () => {
+    process.env.TURNSTILE_NEWSLETTER_REQUIRED = "true";
+    const fetchMock = installProviderFetch();
+    const response = await handler(buildRequest({
+      source: "newsletter", firstName: "", lastName: "", email: "reader@example.com", optIn: true, turnstileToken: "test-token",
+    }));
+    expect(response.status).toBe(503);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing newsletter challenges before any Brevo or CRM writes", async () => {
+    process.env.TURNSTILE_NEWSLETTER_REQUIRED = "true";
+    process.env.TURNSTILE_SECRET_KEY = "test-secret";
+    const fetchMock = installProviderFetch();
+    const response = await handler(buildRequest({
+      source: "newsletter", firstName: "", lastName: "", email: "reader@example.com", optIn: true,
+    }));
+    expect(response.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects failed or wrong-hostname newsletter challenges without contact capture", async () => {
+    process.env.TURNSTILE_NEWSLETTER_REQUIRED = "true";
+    process.env.TURNSTILE_SECRET_KEY = "test-secret";
+    const fetchMock = installProviderFetch({ turnstileResult: {
+      success: true, hostname: "untrusted.example", action: "newsletter_signup",
+    } });
+    const response = await handler(buildRequest({
+      source: "newsletter", firstName: "", lastName: "", email: "reader@example.com", optIn: true, turnstileToken: "test-token",
+    }));
+    expect(response.status).toBe(403);
+    expect(callsFor(fetchMock, "/siteverify")).toHaveLength(1);
+    expect(callsFor(fetchMock, "api.brevo.com")).toHaveLength(0);
+  });
+
+  it("accepts a verified newsletter challenge and still avoids internal signup emails", async () => {
+    process.env.TURNSTILE_NEWSLETTER_REQUIRED = "true";
+    process.env.TURNSTILE_SECRET_KEY = "test-secret";
+    const fetchMock = installProviderFetch();
+    const response = await handler(buildRequest({
+      source: "newsletter", firstName: "", lastName: "", email: "reader@example.com", optIn: true, turnstileToken: "test-token",
+    }));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true, duplicate: false });
+    expect(callsFor(fetchMock, "/siteverify")).toHaveLength(1);
+    expect(callsFor(fetchMock, "/v3/contacts").filter(([, init]) => String((init as RequestInit).method).toUpperCase() === "POST")).toHaveLength(1);
+    expect(smtpBodies(fetchMock)).toHaveLength(0);
+  });
+
+  it("fails closed when Turnstile is unreachable and preserves non-newsletter sources", async () => {
+    process.env.TURNSTILE_NEWSLETTER_REQUIRED = "true";
+    process.env.TURNSTILE_SECRET_KEY = "test-secret";
+    const fetchMock = installProviderFetch({ turnstileNetworkError: true });
+    const rejected = await handler(buildRequest({
+      source: "newsletter", firstName: "", lastName: "", email: "reader@example.com", optIn: true, turnstileToken: "test-token",
+    }));
+    expect(rejected.status).toBe(503);
+    expect(callsFor(fetchMock, "api.brevo.com")).toHaveLength(0);
+
+    const unaffected = await handler(buildRequest({
+      source: "contact_form", firstName: "Ada", lastName: "Lovelace", email: "ada@example.com", serviceInterest: ["Growth Strategy"],
+    }));
+    expect(unaffected.status).toBe(200);
+  });
+
 });
