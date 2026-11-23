@@ -288,7 +288,7 @@ describe("Netlify leads application-first Tracking Audit flow", () => {
     expect(callsFor(fetchMock, "/crm/tasks")).toHaveLength(1);
   });
 
-  it("preserves newsletter DOI fallback to direct capture", async () => {
+  it("never silently subscribes when an enabled Brevo DOI template is invalid", async () => {
     process.env.BREVO_DOI_TEMPLATE_ID = "42";
     process.env.BREVO_DOI_REDIRECT_URL = "https://alphatrack.digital/newsletter/confirmed";
     const fetchMock = installProviderFetch();
@@ -299,11 +299,12 @@ describe("Netlify leads application-first Tracking Audit flow", () => {
       email: "reader@example.com",
       optIn: true,
     }));
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ ok: true, pendingConfirmation: false, duplicate: false });
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({ ok: false });
     expect(callsFor(fetchMock, "/contacts/doubleOptinConfirmation")).toHaveLength(1);
+    expect(callsFor(fetchMock, "/v3/contacts").filter(([, init]) => String((init as RequestInit).method).toUpperCase() === "POST")).toHaveLength(1);
+    expect(callsFor(fetchMock, "https://api.brevo.com/v3/contacts").filter(([url]) => String(url) === "https://api.brevo.com/v3/contacts")).toHaveLength(0);
     expect(callsFor(fetchMock, "/crm/deals")).toHaveLength(0);
-    // Successful newsletter capture must not send an internal email per signup.
     expect(smtpBodies(fetchMock)).toHaveLength(0);
   });
   it("fails closed if newsletter challenge enforcement has no server secret", async () => {
