@@ -54,6 +54,57 @@ const isRateLimited = (key) => {
   return existing.count > RATE_LIMIT_MAX_REQUESTS;
 };
 
+const verifyNewsletterTurnstile = async (payload, request) => {
+  if (payload.source !== "newsletter" || getEnv("TURNSTILE_NEWSLETTER_REQUIRED")?.trim().toLowerCase() !== "true") {
+    return null;
+  }
+
+  const secret = getEnv("TURNSTILE_SECRET_KEY")?.trim();
+  if (!secret) {
+    console.error("Newsletter Turnstile enforcement enabled without a secret.");
+    return { status: 503, message: "Newsletter verification is temporarily unavailable." };
+  }
+
+  const token = typeof payload.turnstileToken === "string" ? payload.turnstileToken.trim() : "";
+  if (!token || token.length > 2048) {
+    return { status: 403, message: "Please complete the newsletter verification challenge." };
+  }
+
+  const clientIp = getClientIp(request);
+  let siteverify;
+  try {
+    const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        secret,
+        response: token,
+        ...(clientIp === "unknown" ? {} : { remoteip: clientIp }),
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) {
+      return { status: 503, message: "Newsletter verification is temporarily unavailable." };
+    }
+    siteverify = await response.json();
+  } catch {
+    return { status: 503, message: "Newsletter verification is temporarily unavailable." };
+  }
+
+  const allowedHostnames = (getEnv("TURNSTILE_ALLOWED_HOSTNAMES") || "alphatrack.digital,www.alphatrack.digital")
+    .split(",")
+    .map((hostname) => hostname.trim().toLowerCase())
+    .filter(Boolean);
+  const hostname = typeof siteverify?.hostname === "string" ? siteverify.hostname.toLowerCase() : "";
+
+  if (siteverify?.success !== true || siteverify.action !== "newsletter_signup" || !allowedHostnames.includes(hostname)) {
+    return { status: 403, message: "Newsletter verification failed. Please try again." };
+  }
+
+  return null;
+};
+
 const validSources = ["contact_form", "tracking_audit_offer", "newsletter"];
 
 const isValidLeadPayload = (data) => {
@@ -534,6 +585,11 @@ export default async (request) => {
 
   if (!isValidLeadPayload(payload)) {
     return json({ ok: false, message: "Invalid submission payload." }, { status: 400, headers: corsHeaders });
+  }
+
+  const verificationError = await verifyNewsletterTurnstile(payload, request);
+  if (verificationError) {
+    return json({ ok: false, message: verificationError.message }, { status: verificationError.status, headers: corsHeaders });
   }
 
   const brevoApiKey = getEnv("BREVO_API_KEY");
