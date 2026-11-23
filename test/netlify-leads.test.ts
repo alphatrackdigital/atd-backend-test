@@ -294,6 +294,7 @@ describe("Netlify leads application-first Tracking Audit flow", () => {
     await expect(response.json()).resolves.toMatchObject({ ok: true, pendingConfirmation: false, duplicate: false });
     expect(callsFor(fetchMock, "/contacts/doubleOptinConfirmation")).toHaveLength(1);
     expect(callsFor(fetchMock, "/crm/deals")).toHaveLength(0);
-    expect(smtpBodies(fetchMock).some((body) => body.subject === "New newsletter signup")).toBe(true);
+    // Successful newsletter capture must not send an internal email per signup.
+    expect(smtpBodies(fetchMock)).toHaveLength(0);
   });
 });
