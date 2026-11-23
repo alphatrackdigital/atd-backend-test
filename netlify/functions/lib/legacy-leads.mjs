@@ -647,18 +647,9 @@ export default async (request) => {
       },
     );
 
+    // Never downgrade a configured double-opt-in flow to an unverified direct subscription.
     if (!brevoResponse.ok && isNewsletterDoiEnabled) {
-      const errorText = await brevoResponse.text();
-      if (errorText.includes("active DOI template") || errorText.includes("invalid_parameter")) {
-        pendingConfirmation = false;
-        brevoResponse = await fetch("https://api.brevo.com/v3/contacts", {
-          method: "POST",
-          headers: { "content-type": "application/json", "api-key": brevoApiKey },
-          body: JSON.stringify(toBrevoPayload(payload, listId, existingBrevoContact)),
-        });
-      } else {
-        return providerErrorResponse(brevoResponse.status);
-      }
+      return providerErrorResponse(brevoResponse.status);
     }
 
     if (!brevoResponse.ok) {
